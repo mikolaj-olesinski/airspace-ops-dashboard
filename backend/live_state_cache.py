@@ -4,12 +4,21 @@ across every request and every connected client.
 
 Two reasons this beats each request calling OpenSky directly (which is what
 /live-states and /predictions did before):
-  - OpenSky's anonymous tier has a small daily credit budget. N open browser tabs each
+  - OpenSky bills by API credits, not just request count, and N open browser tabs each
     triggering their own call on every poll would multiply usage by N; this bounds
     usage to one call per POLL_INTERVAL_S no matter how many clients are connected.
   - It gives the frontend's time-slider real history (the last HISTORY_MAXLEN
     snapshots, ~1h) instead of only whatever it happened to accumulate client-side
     since the page was opened.
+
+POLL_INTERVAL_S was originally 12s, which exhausted the anonymous tier's 400
+credits/day in well under half an hour: /states/all costs credits by bounding-box
+area (opensky_client.BBOX), and our 7-airport box is ~255 sq deg -> 3 credits/call
+per OpenSky's published table, so 12s polling means 7200 calls/day = 21,600
+credits/day needed against a 400/day budget. Registering an OpenSky OAuth2 client
+(OPENSKY_CLIENT_ID/SECRET in backend/.env, see opensky_client.py) raises that to
+4,000/day (Standard tier), which still only affords one call every ~65s at 3
+credits/call -- hence 90s here, not the original 12s, with some margin.
 """
 
 import asyncio
@@ -18,8 +27,8 @@ from typing import Optional
 
 from backend.opensky_client import fetch_live_states
 
-POLL_INTERVAL_S = 12
-HISTORY_MAXLEN = 300  # ~1h of history at one snapshot per POLL_INTERVAL_S
+POLL_INTERVAL_S = 90
+HISTORY_MAXLEN = 300  # ~7.5h of history at one snapshot per POLL_INTERVAL_S
 
 _latest: Optional[dict] = None
 _history: deque = deque(maxlen=HISTORY_MAXLEN)

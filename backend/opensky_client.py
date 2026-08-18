@@ -1,12 +1,32 @@
-"""Thin wrapper around the OpenSky Network REST API (anonymous tier, no auth)."""
+"""Thin wrapper around the OpenSky Network REST API.
 
+Uses a registered OAuth2 client (OPENSKY_CLIENT_ID/OPENSKY_CLIENT_SECRET in
+backend/.env) when present -- a separate, larger quota than the anonymous tier, and
+what actually got this project unblocked after burning through the anonymous daily
+budget during development. Falls back to anonymous (no auth header) if the client
+credentials aren't set, so this still works for local dev without them.
+"""
+
+import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from dotenv import load_dotenv
+
 from backend.http_utils import make_session, run_with_hard_timeout
 from ml.features import AIRPORT_COORDS
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
+TOKEN_URL = (
+    "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token"
+)
+
+_token: str | None = None
+_token_expires_at: float = 0.0
 
 HARD_TIMEOUT_S = 20
 
@@ -52,8 +72,34 @@ STATE_FIELDS = [
 ]
 
 
+def _get_access_token() -> str | None:
+    """OAuth2 client-credentials flow. Tokens last ~30min; refreshed a minute early
+    so an in-flight request never gets a token that expires mid-call."""
+    global _token, _token_expires_at
+    client_id = os.environ.get("OPENSKY_CLIENT_ID")
+    client_secret = os.environ.get("OPENSKY_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        return None
+
+    if _token is not None and time.time() < _token_expires_at - 60:
+        return _token
+
+    resp = make_session(OPENSKY_RETRIES).post(
+        TOKEN_URL,
+        data={"grant_type": "client_credentials", "client_id": client_id, "client_secret": client_secret},
+        timeout=(5, 15),
+    )
+    resp.raise_for_status()
+    body = resp.json()
+    _token = body["access_token"]
+    _token_expires_at = time.time() + body.get("expires_in", 1800)
+    return _token
+
+
 def _fetch_live_states() -> dict:
-    resp = make_session(OPENSKY_RETRIES).get(STATES_URL, params=BBOX, timeout=(5, 15))
+    token = _get_access_token()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    resp = make_session(OPENSKY_RETRIES).get(STATES_URL, params=BBOX, headers=headers, timeout=(5, 15))
     resp.raise_for_status()
     payload = resp.json()
 

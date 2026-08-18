@@ -12,7 +12,9 @@ import { useLiveStates, usePredictions, usePredictionsHistory } from "./lib/api"
 import { useAircraftHistory, type Snapshot } from "./lib/history";
 
 const PLAYBACK_STEP_MS = 450;
-const LIVE_TRANSITION_MS = 11_000;
+// matches live_state_cache.py's POLL_INTERVAL_S (90s), minus a margin so a glide
+// finishes before the next snapshot lands rather than getting cut off mid-motion
+const LIVE_TRANSITION_MS = 85_000;
 
 export default function App() {
   const { data: liveStates, error: liveError } = useLiveStates();
