@@ -19,6 +19,10 @@ export default function RiskRadar({ predictions }: { predictions: AirportPredict
     return [center + Math.cos(a) * maxR * frac, center + Math.sin(a) * maxR * frac] as const;
   };
 
+  if (n === 0) {
+    return <svg width={size} height={size} className="mx-auto" />;
+  }
+
   const dataPoints = predictions.map((p, i) => pointAt(i, Math.max(0.06, p.risk_score)));
   const dataPath = dataPoints.map((pt, i) => `${i === 0 ? "M" : "L"}${pt[0]},${pt[1]}`).join(" ") + "Z";
 

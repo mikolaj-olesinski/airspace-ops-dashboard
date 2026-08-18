@@ -35,10 +35,11 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* bklit-style corner tick marks on panels */
-.tick-corners {
-  position: relative;
-}
+/* bklit-style corner tick marks on panels. Every element using this class already
+   sets its own position (relative/absolute) via a Tailwind utility class -- setting
+   position here too would fight Tailwind's utility at equal specificity, decided only
+   by cascade order (this lost to .absolute before, silently breaking the detail cards
+   and time-slider: they rendered in normal flow instead of overlaying the map). */
 .tick-corners::before,
 .tick-corners::after,
 .tick-corners > .tick-tl,
