@@ -35,3 +35,8 @@ export interface Predictions {
   computed_at: number;
   predictions: AirportPrediction[];
 }
+
+export interface Briefing {
+  briefing: string;
+  generated_at: number;
+}

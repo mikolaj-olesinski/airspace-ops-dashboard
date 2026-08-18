@@ -1,4 +1,4 @@
-# build context is the repo root (see docker-compose.yml) -- backend/ imports ml/
+# build context is the repo root (see docker-compose.yml) -- backend/ imports ml/ and agent/
 FROM python:3.12-slim
 WORKDIR /app
 
@@ -11,6 +11,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY ml/ ml/
+COPY agent/ agent/
 COPY backend/ backend/
 
 EXPOSE 8000

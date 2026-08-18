@@ -14,3 +14,5 @@ mlflow
 scikit-learn
 fastapi
 uvicorn
+langgraph
+langchain-anthropic

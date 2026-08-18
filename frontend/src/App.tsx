@@ -145,7 +145,7 @@ export default function App() {
 
         <div style={{ gridArea: "briefing" }} className="min-h-0">
           <Panel label="Ops Briefing" className="h-full">
-            <BriefingPanel predictions={preds} />
+            <BriefingPanel />
           </Panel>
         </div>
       </main>

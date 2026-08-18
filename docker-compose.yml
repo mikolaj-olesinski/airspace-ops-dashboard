@@ -5,6 +5,10 @@ services:
       dockerfile: backend/Dockerfile
     ports:
       - "8000:8000"
+    env_file:
+      # gitignored; holds ANTHROPIC_API_KEY for agent/briefing_agent.py. Injected at
+      # container runtime, not baked into the image.
+      - backend/.env
     volumes:
       # the trained model (mlruns/) and cached data (data/) are gitignored and
       # produced by ml/train.py + the scripts/ pipeline -- mount them from the host

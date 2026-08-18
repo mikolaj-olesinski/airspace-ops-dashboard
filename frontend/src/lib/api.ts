@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { LiveStates, Predictions } from "./types";
+import type { Briefing, LiveStates, Predictions } from "./types";
 
 async function getJSON<T>(path: string): Promise<T> {
   const res = await fetch(`/api${path}`);
@@ -56,4 +56,10 @@ export function useLiveStates() {
 
 export function usePredictions() {
   return usePolling<Predictions>("/predictions", 30_000);
+}
+
+export function useBriefing() {
+  // matches the backend's briefing_cache.py TTL -- polling faster wouldn't return
+  // anything new anyway
+  return usePolling<Briefing>("/briefing", 60_000);
 }
