@@ -1,14 +1,15 @@
 import { useFeatureImportance } from "../lib/api";
+import EmptyState from "./EmptyState";
 
 export default function FeatureImportanceChart() {
   const { data, loading, error } = useFeatureImportance();
   const features = data?.features ?? [];
 
   if (loading && features.length === 0) {
-    return <p className="text-[11px] text-[var(--text-dim)]">loading model...</p>;
+    return <EmptyState message="loading model..." variant="loading" />;
   }
   if (error && features.length === 0) {
-    return <p className="text-[11px] text-[var(--text-dim)]">unavailable: {error}</p>;
+    return <EmptyState message={`unavailable: ${error}`} variant="error" />;
   }
 
   const max = Math.max(...features.map((f) => f.importance), 0.0001);

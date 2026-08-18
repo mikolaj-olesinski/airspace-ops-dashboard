@@ -1,4 +1,5 @@
 import type { AirportPrediction } from "../lib/types";
+import EmptyState from "./EmptyState";
 
 const RISK_COLOR: Record<string, string> = {
   low: "#d4d4d8",
@@ -20,7 +21,7 @@ export default function RiskRadar({ predictions }: { predictions: AirportPredict
   };
 
   if (n === 0) {
-    return <svg width={size} height={size} className="mx-auto" />;
+    return <EmptyState message="waiting for predictions..." variant="loading" />;
   }
 
   const dataPoints = predictions.map((p, i) => pointAt(i, Math.max(0.06, p.risk_score)));

@@ -1,5 +1,6 @@
 import type { AirportPrediction, PredictionsSnapshot } from "../lib/types";
 import Sparkline from "./Sparkline";
+import EmptyState from "./EmptyState";
 
 const RISK_COLOR: Record<string, string> = {
   low: "var(--risk-low)",
@@ -21,6 +22,11 @@ export default function RiskBars({
   history?: PredictionsSnapshot[];
 }) {
   const sorted = [...predictions].sort((a, b) => b.risk_score - a.risk_score);
+
+  if (sorted.length === 0) {
+    return <EmptyState message="waiting for predictions..." variant="loading" />;
+  }
+
   return (
     <div className="flex h-full flex-col justify-center gap-3">
       {sorted.map((p, i) => (

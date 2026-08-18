@@ -1,3 +1,5 @@
+import EmptyState from "./EmptyState";
+
 interface AreaChartProps {
   values: number[];
   height?: number;
@@ -11,11 +13,7 @@ export default function AreaChart({ values, height = 120, color = "#60a5fa", uni
   const width = 600; // viewBox units; actual rendered width is responsive (see svg width="100%")
 
   if (values.length < 2) {
-    return (
-      <div className="flex h-full items-center justify-center text-[11px] text-[var(--text-dim)]">
-        collecting data...
-      </div>
-    );
+    return <EmptyState message="collecting data..." variant="loading" />;
   }
 
   const min = Math.min(...values);

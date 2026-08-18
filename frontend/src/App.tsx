@@ -112,7 +112,7 @@ export default function App() {
             <StatGauge
               value={aircraft.length}
               max={Math.max(300, aircraft.length)}
-              displayValue={String(aircraft.length)}
+              format={(v) => String(Math.round(v))}
               label="in region"
             />
           </Panel>
@@ -123,7 +123,7 @@ export default function App() {
             <StatGauge
               value={topRisk?.risk_score ?? 0}
               max={1}
-              displayValue={topRisk ? `${Math.round(topRisk.risk_score * 100)}%` : "--"}
+              format={(v) => (topRisk ? `${Math.round(v * 100)}%` : "--")}
               label={topRisk?.airport ?? "n/a"}
               color={
                 topRisk?.risk_level === "high"
