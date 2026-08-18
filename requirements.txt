@@ -8,3 +8,4 @@ networkx
 pyarrow
 ipykernel
 nbconvert
+apache-beam
