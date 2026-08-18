@@ -9,3 +9,6 @@ pyarrow
 ipykernel
 nbconvert
 apache-beam
+lightgbm
+mlflow
+scikit-learn
