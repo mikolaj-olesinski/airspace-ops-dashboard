@@ -126,9 +126,9 @@ def briefing():
 
 
 @app.get("/agent/ask")
-def agent_ask_endpoint(q: str):
+def agent_ask_endpoint(q: str, thread_id: str = "default"):
     try:
-        return {"question": q, "answer": agent_ask(q)}
+        return {"question": q, "answer": agent_ask(q, thread_id=thread_id)}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Agent failed: {exc}") from exc
 
