@@ -28,7 +28,12 @@ export default function App() {
         }}
       >
         <div style={{ gridArea: "map" }} className="min-h-0">
-          <Panel label="Live Traffic" sublabel={`${aircraft.length} aircraft`} bodyClassName="!p-0" className="h-full overflow-hidden">
+          <Panel
+            label="Live Traffic"
+            sublabel={`${aircraft.length} aircraft · click to inspect`}
+            bodyClassName="!p-0"
+            className="h-full overflow-hidden"
+          >
             <MapView aircraft={aircraft} predictions={preds} />
           </Panel>
         </div>

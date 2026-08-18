@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { Aircraft, AirportPrediction } from "../lib/types";
@@ -10,9 +10,15 @@ const RISK_COLOR: Record<string, string> = {
   high: "#f0563a",
 };
 
-type Pos = { lon: number; lat: number; heading: number };
+const TRAIL_LENGTH = 15;
 
-function makePlaneIcon(): ImageData {
+type Pos = { lon: number; lat: number; heading: number };
+type Selection =
+  | { kind: "aircraft"; id: string }
+  | { kind: "airport"; code: string }
+  | null;
+
+function makePlaneIcon(fill: string): ImageData {
   const s = 32;
   const canvas = document.createElement("canvas");
   canvas.width = s;
@@ -25,18 +31,18 @@ function makePlaneIcon(): ImageData {
   ctx.lineTo(0, 5);
   ctx.lineTo(-8, 10);
   ctx.closePath();
-  ctx.fillStyle = "#e5e7eb";
+  ctx.fillStyle = fill;
   ctx.fill();
   return ctx.getImageData(0, 0, s, s);
 }
 
-function aircraftToFeatures(positions: Map<string, Pos>) {
+function aircraftToFeatures(positions: Map<string, Pos>, selectedId: string | null) {
   return {
     type: "FeatureCollection" as const,
     features: Array.from(positions.entries()).map(([id, p]) => ({
       type: "Feature" as const,
       geometry: { type: "Point" as const, coordinates: [p.lon, p.lat] },
-      properties: { id, heading: p.heading },
+      properties: { id, heading: p.heading, selected: id === selectedId ? 1 : 0 },
     })),
   };
 }
@@ -60,6 +66,10 @@ function airportFeatures(predictions: AirportPrediction[]) {
   };
 }
 
+function emptyLine() {
+  return { type: "FeatureCollection" as const, features: [] as GeoJSON.Feature[] };
+}
+
 interface MapViewProps {
   aircraft: Aircraft[];
   predictions: AirportPrediction[];
@@ -70,9 +80,15 @@ export default function MapView({ aircraft, predictions }: MapViewProps) {
   const mapRef = useRef<maplibregl.Map | null>(null);
   const prevPos = useRef<Map<string, Pos>>(new Map());
   const targetPos = useRef<Map<string, Pos>>(new Map());
+  const trailHistory = useRef<Map<string, [number, number][]>>(new Map());
   const animFrame = useRef<number | null>(null);
   const predictionsRef = useRef(predictions);
   predictionsRef.current = predictions;
+  const aircraftById = useRef<Map<string, Aircraft>>(new Map());
+
+  const [selected, setSelected] = useState<Selection>(null);
+  const selectedRef = useRef<Selection>(null);
+  selectedRef.current = selected;
 
   // map init (once)
   useEffect(() => {
@@ -87,17 +103,31 @@ export default function MapView({ aircraft, predictions }: MapViewProps) {
     mapRef.current = map;
 
     map.on("load", () => {
-      map.addImage("plane", makePlaneIcon());
+      map.addImage("plane", makePlaneIcon("#e5e7eb"));
+      map.addImage("plane-selected", makePlaneIcon("#60a5fa"));
 
-      map.addSource("aircraft", { type: "geojson", data: aircraftToFeatures(new Map()) });
+      map.addSource("trail", { type: "geojson", data: emptyLine() });
+      map.addLayer({
+        id: "trail-line",
+        type: "line",
+        source: "trail",
+        paint: {
+          "line-color": "#60a5fa",
+          "line-width": 1.5,
+          "line-opacity": 0.6,
+          "line-dasharray": [1, 1.5],
+        },
+      });
+
+      map.addSource("aircraft", { type: "geojson", data: aircraftToFeatures(new Map(), null) });
       map.addLayer({
         id: "aircraft-glow",
         type: "circle",
         source: "aircraft",
         paint: {
-          "circle-radius": 9,
-          "circle-color": "#e5e7eb",
-          "circle-opacity": 0.08,
+          "circle-radius": ["case", ["==", ["get", "selected"], 1], 14, 9],
+          "circle-color": ["case", ["==", ["get", "selected"], 1], "#60a5fa", "#e5e7eb"],
+          "circle-opacity": ["case", ["==", ["get", "selected"], 1], 0.18, 0.08],
           "circle-blur": 1,
         },
       });
@@ -106,8 +136,8 @@ export default function MapView({ aircraft, predictions }: MapViewProps) {
         type: "symbol",
         source: "aircraft",
         layout: {
-          "icon-image": "plane",
-          "icon-size": 0.5,
+          "icon-image": ["case", ["==", ["get", "selected"], 1], "plane-selected", "plane"],
+          "icon-size": ["case", ["==", ["get", "selected"], 1], 0.65, 0.5],
           "icon-rotate": ["get", "heading"],
           "icon-rotation-alignment": "map",
           "icon-allow-overlap": true,
@@ -149,6 +179,28 @@ export default function MapView({ aircraft, predictions }: MapViewProps) {
         },
         paint: { "text-color": "#9ca3af" },
       });
+
+      const clickableLayers = ["aircraft-icons", "aircraft-glow", "airport-dots", "airport-rings"];
+      for (const layer of clickableLayers) {
+        map.on("mouseenter", layer, () => (map.getCanvas().style.cursor = "pointer"));
+        map.on("mouseleave", layer, () => (map.getCanvas().style.cursor = ""));
+      }
+
+      map.on("click", (e) => {
+        const hits = map.queryRenderedFeatures(e.point, {
+          layers: clickableLayers,
+        });
+        if (hits.length === 0) {
+          setSelected(null);
+          return;
+        }
+        const hit = hits[0];
+        if (hit.layer.id.startsWith("aircraft")) {
+          setSelected({ kind: "aircraft", id: hit.properties!.id as string });
+        } else {
+          setSelected({ kind: "airport", code: hit.properties!.code as string });
+        }
+      });
     });
 
     return () => {
@@ -165,10 +217,30 @@ export default function MapView({ aircraft, predictions }: MapViewProps) {
     src?.setData(airportFeatures(predictions));
   }, [predictions]);
 
+  // clear the selected aircraft's trail if it's no longer selected
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !map.getSource("trail")) return;
+    const src = map.getSource("trail") as maplibregl.GeoJSONSource;
+    if (selected?.kind !== "aircraft") {
+      src.setData(emptyLine());
+      return;
+    }
+    const history = trailHistory.current.get(selected.id);
+    if (history && history.length >= 2) {
+      src.setData({
+        type: "FeatureCollection",
+        features: [{ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: history } }],
+      });
+    }
+  }, [selected]);
+
   // animate aircraft positions smoothly between polls instead of snapping
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
+
+    aircraftById.current = new Map(aircraft.map((a) => [a.icao24, a]));
 
     const nextTarget = new Map<string, Pos>();
     for (const a of aircraft) {
@@ -178,6 +250,11 @@ export default function MapView({ aircraft, predictions }: MapViewProps) {
         lat: a.latitude,
         heading: a.true_track ?? 0,
       });
+
+      const hist = trailHistory.current.get(a.icao24) ?? [];
+      hist.push([a.longitude, a.latitude]);
+      if (hist.length > TRAIL_LENGTH) hist.shift();
+      trailHistory.current.set(a.icao24, hist);
     }
 
     prevPos.current = targetPos.current.size ? new Map(targetPos.current) : new Map(nextTarget);
@@ -202,7 +279,7 @@ export default function MapView({ aircraft, predictions }: MapViewProps) {
       }
 
       const src = map.getSource("aircraft") as maplibregl.GeoJSONSource | undefined;
-      src?.setData(aircraftToFeatures(interpolated));
+      src?.setData(aircraftToFeatures(interpolated, selectedRef.current?.kind === "aircraft" ? selectedRef.current.id : null));
 
       if (t < 1) animFrame.current = requestAnimationFrame(step);
     };
@@ -211,7 +288,83 @@ export default function MapView({ aircraft, predictions }: MapViewProps) {
     return () => {
       if (animFrame.current) cancelAnimationFrame(animFrame.current);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aircraft]);
 
-  return <div ref={containerRef} className="h-full w-full" />;
+  const selectedAircraft = selected?.kind === "aircraft" ? aircraftById.current.get(selected.id) : null;
+  const selectedAirport =
+    selected?.kind === "airport" ? predictions.find((p) => p.airport === selected.code) : null;
+
+  return (
+    <div className="relative h-full w-full">
+      <div ref={containerRef} className="h-full w-full" />
+
+      {selected?.kind === "aircraft" && (
+        <div className="fade-in tick-corners absolute bottom-3 left-3 w-56 border border-[var(--panel-border-strong)] bg-[#0a0b0cf0] p-3 backdrop-blur-sm">
+          <div className="flex items-start justify-between">
+            <span className="font-num text-sm font-semibold text-[#60a5fa]">
+              {selectedAircraft?.callsign?.trim() || selected.id.toUpperCase()}
+            </span>
+            <button onClick={() => setSelected(null)} className="text-[var(--text-dim)] hover:text-white">
+              ✕
+            </button>
+          </div>
+          {selectedAircraft ? (
+            <dl className="mt-2 space-y-1 text-[11px]">
+              <Row label="origin" value={selectedAircraft.origin_country} />
+              <Row
+                label="altitude"
+                value={selectedAircraft.baro_altitude != null ? `${Math.round(selectedAircraft.baro_altitude)} m` : "n/a"}
+              />
+              <Row
+                label="speed"
+                value={selectedAircraft.velocity != null ? `${Math.round(selectedAircraft.velocity * 3.6)} km/h` : "n/a"}
+              />
+              <Row label="heading" value={selectedAircraft.true_track != null ? `${Math.round(selectedAircraft.true_track)}°` : "n/a"} />
+              <Row label="icao24" value={selected.id} />
+            </dl>
+          ) : (
+            <p className="mt-2 text-[11px] text-[var(--text-dim)]">left radar coverage</p>
+          )}
+        </div>
+      )}
+
+      {selected?.kind === "airport" && (
+        <div className="fade-in tick-corners absolute bottom-3 left-3 w-56 border border-[var(--panel-border-strong)] bg-[#0a0b0cf0] p-3 backdrop-blur-sm">
+          <div className="flex items-start justify-between">
+            <span className="font-num text-sm font-semibold text-white">{selected.code}</span>
+            <button onClick={() => setSelected(null)} className="text-[var(--text-dim)] hover:text-white">
+              ✕
+            </button>
+          </div>
+          {selectedAirport ? (
+            <dl className="mt-2 space-y-1 text-[11px]">
+              <Row label="risk score" value={`${Math.round(selectedAirport.risk_score * 100)}%`} />
+              <Row label="risk level" value={selectedAirport.risk_level} />
+              <Row label="live traffic" value={`${selectedAirport.live_traffic_count} aircraft`} />
+              <Row
+                label="wind"
+                value={selectedAirport.weather.wind_speed_10m != null ? `${selectedAirport.weather.wind_speed_10m} km/h` : "n/a"}
+              />
+              <Row
+                label="temp"
+                value={selectedAirport.weather.temperature_2m != null ? `${selectedAirport.weather.temperature_2m}°C` : "n/a"}
+              />
+            </dl>
+          ) : (
+            <p className="mt-2 text-[11px] text-[var(--text-dim)]">waiting for prediction...</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Row({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between">
+      <dt className="text-[var(--text-dim)]">{label}</dt>
+      <dd className="font-num text-[#d1d5db]">{value}</dd>
+    </div>
+  );
 }
