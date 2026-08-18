@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { Aircraft, AirportPrediction } from "../lib/types";
+import type { Snapshot } from "../lib/history";
 import { AIRPORT_COORDS } from "../lib/airports";
+import TimeSlider from "./TimeSlider";
 
 const RISK_COLOR: Record<string, string> = {
   low: "#8b8f98",
@@ -73,9 +75,29 @@ function emptyLine() {
 interface MapViewProps {
   aircraft: Aircraft[];
   predictions: AirportPrediction[];
+  /** how long the position-interpolation animation should take to reach the new
+   * aircraft prop -- long (matching the poll interval) when tracking live data, short
+   * when stepping through history during scrub/playback so movement stays visible */
+  transitionMs?: number;
+  history: Snapshot[];
+  scrubIndex: number | null;
+  playing: boolean;
+  onScrub: (index: number) => void;
+  onTogglePlay: () => void;
+  onGoLive: () => void;
 }
 
-export default function MapView({ aircraft, predictions }: MapViewProps) {
+export default function MapView({
+  aircraft,
+  predictions,
+  transitionMs = 11_000,
+  history,
+  scrubIndex,
+  playing,
+  onScrub,
+  onTogglePlay,
+  onGoLive,
+}: MapViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const prevPos = useRef<Map<string, Pos>>(new Map());
@@ -261,7 +283,7 @@ export default function MapView({ aircraft, predictions }: MapViewProps) {
     targetPos.current = nextTarget;
 
     if (animFrame.current) cancelAnimationFrame(animFrame.current);
-    const durationMs = 11_000; // just under the 12s poll interval
+    const durationMs = transitionMs;
     const start = performance.now();
 
     const step = (now: number) => {
@@ -289,7 +311,7 @@ export default function MapView({ aircraft, predictions }: MapViewProps) {
       if (animFrame.current) cancelAnimationFrame(animFrame.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [aircraft]);
+  }, [aircraft, transitionMs]);
 
   const selectedAircraft = selected?.kind === "aircraft" ? aircraftById.current.get(selected.id) : null;
   const selectedAirport =
@@ -300,7 +322,7 @@ export default function MapView({ aircraft, predictions }: MapViewProps) {
       <div ref={containerRef} className="h-full w-full" />
 
       {selected?.kind === "aircraft" && (
-        <div className="fade-in tick-corners absolute bottom-3 left-3 w-56 border border-[var(--panel-border-strong)] bg-[#0a0b0cf0] p-3 backdrop-blur-sm">
+        <div className="fade-in tick-corners absolute top-3 left-3 w-56 border border-[var(--panel-border-strong)] bg-[#0a0b0cf0] p-3 backdrop-blur-sm">
           <div className="flex items-start justify-between">
             <span className="font-num text-sm font-semibold text-[#60a5fa]">
               {selectedAircraft?.callsign?.trim() || selected.id.toUpperCase()}
@@ -356,6 +378,15 @@ export default function MapView({ aircraft, predictions }: MapViewProps) {
           )}
         </div>
       )}
+
+      <TimeSlider
+        history={history}
+        scrubIndex={scrubIndex}
+        playing={playing}
+        onScrub={onScrub}
+        onTogglePlay={onTogglePlay}
+        onGoLive={onGoLive}
+      />
     </div>
   );
 }
