@@ -12,3 +12,5 @@ apache-beam
 lightgbm
 mlflow
 scikit-learn
+fastapi
+uvicorn
