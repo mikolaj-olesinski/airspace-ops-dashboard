@@ -40,3 +40,8 @@ export interface Briefing {
   briefing: string;
   generated_at: number;
 }
+
+export interface PredictionsSnapshot {
+  time: number;
+  predictions: AirportPrediction[];
+}

@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import type { Aircraft, AirportPrediction } from "../lib/types";
+import type { Aircraft, AirportPrediction, PredictionsSnapshot } from "../lib/types";
 import type { Snapshot } from "../lib/history";
 import { AIRPORT_COORDS } from "../lib/airports";
 import TimeSlider from "./TimeSlider";
+import Sparkline from "./Sparkline";
 
 const RISK_COLOR: Record<string, string> = {
   low: "#8b8f98",
@@ -80,6 +81,7 @@ interface MapViewProps {
    * when stepping through history during scrub/playback so movement stays visible */
   transitionMs?: number;
   history: Snapshot[];
+  predictionsHistory: PredictionsSnapshot[];
   scrubIndex: number | null;
   playing: boolean;
   onScrub: (index: number) => void;
@@ -92,6 +94,7 @@ export default function MapView({
   predictions,
   transitionMs = 11_000,
   history,
+  predictionsHistory,
   scrubIndex,
   playing,
   onScrub,
@@ -317,6 +320,25 @@ export default function MapView({
   const selectedAirport =
     selected?.kind === "airport" ? predictions.find((p) => p.airport === selected.code) : null;
 
+  const altitudeTrend =
+    selected?.kind === "aircraft"
+      ? history
+          .map((snap) => snap.aircraft.find((a) => a.icao24 === selected.id)?.baro_altitude)
+          .filter((v): v is number => v != null)
+      : [];
+  const speedTrend =
+    selected?.kind === "aircraft"
+      ? history
+          .map((snap) => snap.aircraft.find((a) => a.icao24 === selected.id)?.velocity)
+          .filter((v): v is number => v != null)
+      : [];
+  const riskTrend =
+    selected?.kind === "airport"
+      ? predictionsHistory
+          .map((snap) => snap.predictions.find((p) => p.airport === selected.code)?.risk_score)
+          .filter((v): v is number => v != null)
+      : [];
+
   return (
     <div className="relative h-full w-full">
       <div ref={containerRef} className="h-full w-full" />
@@ -348,6 +370,12 @@ export default function MapView({
           ) : (
             <p className="mt-2 text-[11px] text-[var(--text-dim)]">left radar coverage</p>
           )}
+          <div className="mt-2 border-t border-[var(--panel-border)] pt-2">
+            <span className="text-[10px] uppercase tracking-[0.1em] text-[var(--text-dim)]">altitude (m)</span>
+            <Sparkline values={altitudeTrend} width={208} height={32} color="#60a5fa" />
+            <span className="text-[10px] uppercase tracking-[0.1em] text-[var(--text-dim)]">speed (m/s)</span>
+            <Sparkline values={speedTrend} width={208} height={32} color="#a78bfa" />
+          </div>
         </div>
       )}
 
@@ -376,6 +404,15 @@ export default function MapView({
           ) : (
             <p className="mt-2 text-[11px] text-[var(--text-dim)]">waiting for prediction...</p>
           )}
+          <div className="mt-2 border-t border-[var(--panel-border)] pt-2">
+            <span className="text-[10px] uppercase tracking-[0.1em] text-[var(--text-dim)]">risk trend</span>
+            <Sparkline
+              values={riskTrend}
+              width={208}
+              height={32}
+              color={selectedAirport ? RISK_COLOR[selectedAirport.risk_level] : "#9ca3af"}
+            />
+          </div>
         </div>
       )}
 

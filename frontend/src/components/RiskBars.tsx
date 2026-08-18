@@ -1,4 +1,5 @@
-import type { AirportPrediction } from "../lib/types";
+import type { AirportPrediction, PredictionsSnapshot } from "../lib/types";
+import Sparkline from "./Sparkline";
 
 const RISK_COLOR: Record<string, string> = {
   low: "var(--risk-low)",
@@ -6,7 +7,19 @@ const RISK_COLOR: Record<string, string> = {
   high: "var(--risk-high)",
 };
 
-export default function RiskBars({ predictions }: { predictions: AirportPrediction[] }) {
+function trendFor(history: PredictionsSnapshot[], airport: string): number[] {
+  return history
+    .map((snap) => snap.predictions.find((p) => p.airport === airport)?.risk_score)
+    .filter((v): v is number => v != null);
+}
+
+export default function RiskBars({
+  predictions,
+  history = [],
+}: {
+  predictions: AirportPrediction[];
+  history?: PredictionsSnapshot[];
+}) {
   const sorted = [...predictions].sort((a, b) => b.risk_score - a.risk_score);
   return (
     <div className="flex h-full flex-col justify-center gap-3">
@@ -26,6 +39,9 @@ export default function RiskBars({ predictions }: { predictions: AirportPredicti
           <span className="w-10 shrink-0 text-right font-num text-xs text-[var(--text-mid)]">
             {Math.round(p.risk_score * 100)}%
           </span>
+          <div className="w-10 shrink-0">
+            <Sparkline values={trendFor(history, p.airport)} width={40} height={16} color={RISK_COLOR[p.risk_level]} />
+          </div>
         </div>
       ))}
     </div>

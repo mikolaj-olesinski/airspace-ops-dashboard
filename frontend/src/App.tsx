@@ -6,7 +6,7 @@ import StatGauge from "./components/StatGauge";
 import RiskBars from "./components/RiskBars";
 import RiskRadar from "./components/RiskRadar";
 import BriefingPanel from "./components/BriefingPanel";
-import { useLiveStates, usePredictions } from "./lib/api";
+import { useLiveStates, usePredictions, usePredictionsHistory } from "./lib/api";
 import { useAircraftHistory, type Snapshot } from "./lib/history";
 
 const PLAYBACK_STEP_MS = 450;
@@ -15,9 +15,11 @@ const LIVE_TRANSITION_MS = 11_000;
 export default function App() {
   const { data: liveStates, error: liveError } = useLiveStates();
   const { data: predictions } = usePredictions();
+  const { data: predictionsHistoryData } = usePredictionsHistory();
 
   const aircraft = liveStates?.aircraft ?? [];
   const preds = predictions?.predictions ?? [];
+  const predictionsHistory = predictionsHistoryData?.snapshots ?? [];
   const topRisk = [...preds].sort((a, b) => b.risk_score - a.risk_score)[0];
 
   // rolling in-browser buffer of live snapshots, for the time-slider/playback --
@@ -93,6 +95,7 @@ export default function App() {
               predictions={preds}
               transitionMs={isScrubbing ? PLAYBACK_STEP_MS : LIVE_TRANSITION_MS}
               history={history}
+              predictionsHistory={predictionsHistory}
               scrubIndex={scrubIndex}
               playing={playing}
               onScrub={handleScrub}
@@ -133,7 +136,7 @@ export default function App() {
 
         <div style={{ gridArea: "bars" }} className="min-h-0">
           <Panel label="Delay Risk / Airport" className="h-full">
-            <RiskBars predictions={preds} />
+            <RiskBars predictions={preds} history={predictionsHistory} />
           </Panel>
         </div>
 
