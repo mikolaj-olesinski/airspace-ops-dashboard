@@ -15,7 +15,7 @@ export default function FeatureImportanceChart() {
   const max = Math.max(...features.map((f) => f.importance), 0.0001);
 
   return (
-    <div className="flex h-full flex-col justify-center gap-[6px] overflow-y-auto">
+    <div className="flex h-full flex-col justify-start gap-[6px] overflow-y-auto">
       {features.map((f, i) => (
         <div key={f.feature} className="fade-in flex items-center gap-2" style={{ animationDelay: `${i * 30}ms` }}>
           <span className="w-24 shrink-0 truncate font-num text-[10px] text-[var(--text-mid)]" title={f.feature}>

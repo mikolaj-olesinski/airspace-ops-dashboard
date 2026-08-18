@@ -28,7 +28,7 @@ export default function RiskBars({
   }
 
   return (
-    <div className="flex h-full flex-col justify-center gap-3">
+    <div className="flex h-full flex-col justify-start gap-3 overflow-y-auto">
       {sorted.map((p, i) => (
         <div key={p.airport} className="fade-in flex items-center gap-3" style={{ animationDelay: `${i * 40}ms` }}>
           <span className="w-11 shrink-0 font-num text-xs text-[var(--text-mid)]">{p.airport}</span>
