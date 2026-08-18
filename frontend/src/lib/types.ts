@@ -45,3 +45,8 @@ export interface PredictionsSnapshot {
   time: number;
   predictions: AirportPrediction[];
 }
+
+export interface FeatureImportance {
+  feature: string;
+  importance: number;
+}

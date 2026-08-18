@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { Briefing, LiveStates, Predictions, PredictionsSnapshot } from "./types";
+import type { Briefing, FeatureImportance, LiveStates, Predictions, PredictionsSnapshot } from "./types";
 
 async function getJSON<T>(path: string): Promise<T> {
   const res = await fetch(`/api${path}`);
@@ -67,4 +67,10 @@ export function useBriefing() {
 export function usePredictionsHistory() {
   // matches predictions_history_cache.py's poll interval
   return usePolling<{ snapshots: PredictionsSnapshot[] }>("/predictions/history", 30_000);
+}
+
+export function useFeatureImportance() {
+  // static per model version -- refetching every 10min just self-heals if the model
+  // is retrained during a long-running session, not meant as "live" polling
+  return usePolling<{ features: FeatureImportance[] }>("/model/feature-importance", 600_000);
 }

@@ -6,6 +6,8 @@ import StatGauge from "./components/StatGauge";
 import RiskBars from "./components/RiskBars";
 import RiskRadar from "./components/RiskRadar";
 import BriefingPanel from "./components/BriefingPanel";
+import AreaChart from "./components/AreaChart";
+import FeatureImportanceChart from "./components/FeatureImportanceChart";
 import { useLiveStates, usePredictions, usePredictionsHistory } from "./lib/api";
 import { useAircraftHistory, type Snapshot } from "./lib/history";
 
@@ -76,11 +78,11 @@ export default function App() {
       <Header isLive={!liveError && !!liveStates} />
 
       <main
-        className="grid flex-1 gap-3 p-3"
+        className="grid flex-1 gap-3 overflow-y-auto p-3"
         style={{
           gridTemplateColumns: "2fr 1fr 1fr",
-          gridTemplateRows: "200px 1fr 170px",
-          gridTemplateAreas: `"map gauge1 gauge2" "map bars radar" "briefing briefing briefing"`,
+          gridTemplateRows: "200px 1fr 150px 170px",
+          gridTemplateAreas: `"map gauge1 gauge2" "map bars radar" "load load importance" "briefing briefing briefing"`,
         }}
       >
         <div style={{ gridArea: "map" }} className="min-h-0">
@@ -143,6 +145,18 @@ export default function App() {
         <div style={{ gridArea: "radar" }} className="min-h-0">
           <Panel label="Risk Profile" className="h-full" bodyClassName="flex items-center">
             <RiskRadar predictions={preds} />
+          </Panel>
+        </div>
+
+        <div style={{ gridArea: "load" }} className="min-h-0">
+          <Panel label="Airspace Load" sublabel="aircraft tracked over time" className="h-full">
+            <AreaChart values={history.map((s) => s.aircraft.length)} color="#e5e7eb" unit="aircraft" />
+          </Panel>
+        </div>
+
+        <div style={{ gridArea: "importance" }} className="min-h-0">
+          <Panel label="Feature Importance" sublabel="LightGBM · gain" className="h-full">
+            <FeatureImportanceChart />
           </Panel>
         </div>
 

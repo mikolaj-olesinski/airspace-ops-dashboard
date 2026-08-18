@@ -81,6 +81,15 @@ def get_model():
     return _model
 
 
+def get_feature_importance() -> list[dict]:
+    model = get_model()
+    names = model.feature_name()
+    gains = model.feature_importance(importance_type="gain")
+    total = float(sum(gains)) or 1.0
+    ranked = sorted(zip(names, gains), key=lambda kv: kv[1], reverse=True)
+    return [{"feature": name, "importance": round(float(g) / total, 4)} for name, g in ranked]
+
+
 def risk_level(score: float) -> str:
     if score < RISK_THRESHOLDS["low"]:
         return "low"

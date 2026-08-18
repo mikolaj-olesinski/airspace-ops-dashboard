@@ -36,7 +36,7 @@ from agent.qa_agent import ask as agent_ask
 from backend.briefing_cache import get_briefing
 from backend.live_state_cache import get_history, get_latest
 from backend.live_state_cache import start_background_poll as start_states_poll
-from backend.model_service import get_model
+from backend.model_service import get_feature_importance, get_model
 from backend.predictions_history_cache import get_predictions_history
 from backend.predictions_history_cache import start_background_poll as start_predictions_poll
 from backend.predictions_service import compute_predictions
@@ -77,6 +77,7 @@ def root():
             "/predictions/history",
             "/briefing",
             "/agent/ask",
+            "/model/feature-importance",
         ],
     }
 
@@ -130,3 +131,8 @@ def agent_ask_endpoint(q: str):
         return {"question": q, "answer": agent_ask(q)}
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Agent failed: {exc}") from exc
+
+
+@app.get("/model/feature-importance")
+def feature_importance():
+    return {"features": get_feature_importance()}
