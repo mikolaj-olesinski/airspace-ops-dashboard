@@ -1,0 +1,10 @@
+.git
+.venv
+data
+mlruns
+frontend/node_modules
+frontend/dist
+notebooks
+scripts
+*.pyc
+__pycache__

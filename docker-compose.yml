@@ -1,0 +1,25 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      # the trained model (mlruns/) and cached data (data/) are gitignored and
+      # produced by ml/train.py + the scripts/ pipeline -- mount them from the host
+      # rather than baking them into the image. On a new machine (e.g. a Mac), run
+      # that pipeline once there too (or copy these two folders over) before predictions
+      # will work.
+      - ./mlruns:/app/mlruns
+      - ./data:/app/data
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "5173:5173"
+    environment:
+      - BACKEND_URL=http://backend:8000
+    depends_on:
+      - backend

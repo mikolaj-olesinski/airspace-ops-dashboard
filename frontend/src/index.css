@@ -1,0 +1,100 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #08090a;
+  --panel-border: rgba(255, 255, 255, 0.09);
+  --panel-border-strong: rgba(255, 255, 255, 0.16);
+  --text-dim: #6b7280;
+  --text-mid: #9ca3af;
+  --risk-low: #d4d4d8;
+  --risk-medium: #f5a623;
+  --risk-high: #f0563a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: #e5e7eb;
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.font-num {
+  font-family: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* bklit-style corner tick marks on panels */
+.tick-corners {
+  position: relative;
+}
+.tick-corners::before,
+.tick-corners::after,
+.tick-corners > .tick-tl,
+.tick-corners > .tick-tr {
+  content: "";
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  pointer-events: none;
+}
+.tick-corners::before {
+  top: -1px;
+  left: -1px;
+  border-top: 1px solid var(--panel-border-strong);
+  border-left: 1px solid var(--panel-border-strong);
+}
+.tick-corners::after {
+  bottom: -1px;
+  right: -1px;
+  border-bottom: 1px solid var(--panel-border-strong);
+  border-right: 1px solid var(--panel-border-strong);
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(0.85);
+  }
+}
+.live-dot {
+  animation: pulse-dot 1.8s ease-in-out infinite;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.fade-in {
+  animation: fade-in 0.4s ease-out both;
+}
+
+.maplibregl-ctrl-attrib {
+  font-size: 10px !important;
+  background: transparent !important;
+}
+.maplibregl-ctrl-logo {
+  display: none !important;
+}
