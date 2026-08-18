@@ -19,6 +19,9 @@ frontend uses for its time-slider and risk-trend sparklines):
                                 (agent/briefing_agent.py), generated from the same
                                 predictions as /predictions and cached for ~60s
                                 (briefing_cache.py) so polling doesn't hammer the LLM
+  GET /agent/ask               -- free-text Q&A against a LangGraph ReAct agent
+                                (agent/qa_agent.py) with tools for live predictions,
+                                aircraft lookup, and risk trends (agent/tools.py)
 """
 
 import sys
@@ -29,13 +32,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from agent.qa_agent import ask as agent_ask
 from backend.briefing_cache import get_briefing
 from backend.live_state_cache import get_history, get_latest
 from backend.live_state_cache import start_background_poll as start_states_poll
+from backend.model_service import get_model
 from backend.predictions_history_cache import get_predictions_history
 from backend.predictions_history_cache import start_background_poll as start_predictions_poll
 from backend.predictions_service import compute_predictions
-from backend.model_service import get_model
+from backend.streaming_traffic_cache import start_background_poll as start_traffic_poll
 
 app = FastAPI(title="Live Airspace Ops Dashboard API")
 
@@ -58,13 +63,21 @@ def _warm_up_model():
 async def _start_pollers():
     start_states_poll()
     start_predictions_poll()
+    start_traffic_poll()
 
 
 @app.get("/")
 def root():
     return {
         "status": "ok",
-        "endpoints": ["/live-states", "/history", "/predictions", "/predictions/history", "/briefing"],
+        "endpoints": [
+            "/live-states",
+            "/history",
+            "/predictions",
+            "/predictions/history",
+            "/briefing",
+            "/agent/ask",
+        ],
     }
 
 
@@ -109,3 +122,11 @@ def briefing():
         return get_briefing(results)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Briefing generation failed: {exc}") from exc
+
+
+@app.get("/agent/ask")
+def agent_ask_endpoint(q: str):
+    try:
+        return {"question": q, "answer": agent_ask(q)}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Agent failed: {exc}") from exc

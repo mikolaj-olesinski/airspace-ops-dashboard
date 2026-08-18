@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from backend.model_service import predict_risk
 from backend.opensky_client import count_aircraft_near
+from backend.streaming_traffic_cache import get_latest_traffic
 from backend.weather_client import fetch_current_weather
 from ml.features import AIRPORT_COORDS
 
@@ -22,8 +23,22 @@ def compute_predictions(states: dict) -> list[dict]:
     with ThreadPoolExecutor(max_workers=len(airports)) as pool:
         weather_by_airport = dict(zip(airports, pool.map(fetch_current_weather, airports)))
 
+    # the Beam-computed rolling window (streaming_traffic_cache.py) takes a while to
+    # produce its first result after startup -- predict_risk() falls back to the
+    # instant radius count for both windows until then
+    rolling_traffic = get_latest_traffic() or {}
+
     results = []
     for airport, (lat, lon) in AIRPORT_COORDS.items():
         live_traffic_count = count_aircraft_near(states["aircraft"], lat, lon)
-        results.append(predict_risk(airport, live_traffic_count, weather_by_airport[airport]))
+        traffic = rolling_traffic.get(airport, {})
+        results.append(
+            predict_risk(
+                airport,
+                live_traffic_count,
+                weather_by_airport[airport],
+                traffic_1h=traffic.get("traffic_1h"),
+                traffic_3h=traffic.get("traffic_3h"),
+            )
+        )
     return results

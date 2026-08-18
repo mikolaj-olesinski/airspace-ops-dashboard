@@ -4,9 +4,14 @@ Live feature construction is necessarily an approximation of the training featur
 (ml/features.py), since OpenSky's free tier gives a snapshot of aircraft positions, not
 a per-airport departure/delay history:
   - traffic_1h / traffic_3h: at training time this was a true rolling count of recent
-    departures. Live, we substitute the number of aircraft currently within ~2 degrees
-    of the airport from a single OpenSky snapshot -- a live airspace-density proxy, not
-    a literal count of the last hour's departures.
+    departures. Live, backend/streaming_traffic.py computes a genuine rolling-window
+    count via Beam (distinct aircraft seen near the airport in the trailing 1h/3h,
+    reprocessing the buffered snapshot history -- see that module's docstring) --
+    closer to the training semantics than a single instant, but still "aircraft seen
+    nearby" rather than "aircraft that departed", since OpenSky's free tier has no
+    departure events to count. Until that background computation has produced its
+    first result (a few minutes after startup), predict_risk() falls back to the
+    single-snapshot proxy (aircraft within ~2 degrees right now) for both windows.
   - delay_rate_1h / delay_rate_3h: at training time this was the rolling recent delay
     rate at that airport. Live, there's no free real-time source for "how many of the
     last N flights were delayed", so this falls back to each airport's historical
@@ -84,7 +89,7 @@ def risk_level(score: float) -> str:
     return "high"
 
 
-def build_feature_row(airport: str, live_traffic_count: int, weather: dict) -> pd.DataFrame:
+def build_feature_row(airport: str, traffic_1h: int, traffic_3h: int, weather: dict) -> pd.DataFrame:
     now = datetime.now(timezone.utc)
     delay_rate = HISTORICAL_DELAY_RATE.get(airport, sum(HISTORICAL_DELAY_RATE.values()) / len(HISTORICAL_DELAY_RATE))
 
@@ -97,8 +102,8 @@ def build_feature_row(airport: str, live_traffic_count: int, weather: dict) -> p
         "temperature_2m": weather["temperature_2m"],
         "precipitation": weather["precipitation"],
         "wind_speed_10m": weather["wind_speed_10m"],
-        "traffic_1h": live_traffic_count,
-        "traffic_3h": live_traffic_count,
+        "traffic_1h": traffic_1h,
+        "traffic_3h": traffic_3h,
         "delay_rate_1h": delay_rate,
         "delay_rate_3h": delay_rate,
         "typecode": None,
@@ -109,9 +114,24 @@ def build_feature_row(airport: str, live_traffic_count: int, weather: dict) -> p
     return df[FEATURE_COLUMNS]
 
 
-def predict_risk(airport: str, live_traffic_count: int, weather: dict) -> dict:
+def predict_risk(
+    airport: str,
+    live_traffic_count: int,
+    weather: dict,
+    traffic_1h: int | None = None,
+    traffic_3h: int | None = None,
+) -> dict:
+    """live_traffic_count is the instantaneous "aircraft within radius right now"
+    figure, always shown in the response for the UI. traffic_1h/traffic_3h, when
+    available from streaming_traffic_cache.py's Beam computation, are what actually
+    feed the model instead -- see this module's docstring."""
     model = get_model()
-    X = build_feature_row(airport, live_traffic_count, weather)
+    X = build_feature_row(
+        airport,
+        traffic_1h if traffic_1h is not None else live_traffic_count,
+        traffic_3h if traffic_3h is not None else live_traffic_count,
+        weather,
+    )
     score = float(model.predict(X)[0])
     return {
         "airport": airport,
