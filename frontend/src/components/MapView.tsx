@@ -352,7 +352,7 @@ export default function MapView({
       )}
 
       {selected?.kind === "airport" && (
-        <div className="fade-in tick-corners absolute bottom-3 left-3 w-56 border border-[var(--panel-border-strong)] bg-[#0a0b0cf0] p-3 backdrop-blur-sm">
+        <div className="fade-in tick-corners absolute top-3 left-3 w-56 border border-[var(--panel-border-strong)] bg-[#0a0b0cf0] p-3 backdrop-blur-sm">
           <div className="flex items-start justify-between">
             <span className="font-num text-sm font-semibold text-white">{selected.code}</span>
             <button onClick={() => setSelected(null)} className="text-[var(--text-dim)] hover:text-white">

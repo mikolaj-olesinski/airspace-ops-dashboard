@@ -1,10 +1,13 @@
 """FastAPI backend: proxies live aircraft state and serves per-airport delay-risk
 predictions from the trained LightGBM model.
 
-Two endpoints (per CLAUDE.md's Phase 3 plan):
-  GET /live-states  -- live aircraft positions from OpenSky (proxied so no client-side
-                        credentials are needed, and so the frontend doesn't hit OpenSky's
-                        anonymous-tier rate limit directly)
+Endpoints (per CLAUDE.md's Phase 3 plan, plus /history for the frontend's time-slider):
+  GET /live-states  -- latest cached aircraft positions from OpenSky (a background
+                        poller in live_state_cache.py is the only thing that actually
+                        calls OpenSky; this just reads the cache -- see that module's
+                        docstring for why)
+  GET /history       -- the last ~1h of polled snapshots, for the frontend's
+                        time-slider/playback (no per-client accumulation needed)
   GET /predictions   -- delay-risk score per airport, computed from live traffic +
                         weather (see model_service.py for how "live" features are
                         approximated)
@@ -22,8 +25,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.live_state_cache import get_history, get_latest, start_background_poll
 from backend.model_service import get_model, predict_risk
-from backend.opensky_client import count_aircraft_near, fetch_live_states
+from backend.opensky_client import count_aircraft_near
 from backend.weather_client import fetch_current_weather
 from ml.features import AIRPORT_COORDS
 
@@ -44,25 +48,34 @@ def _warm_up_model():
     get_model()
 
 
+@app.on_event("startup")
+async def _start_poller():
+    start_background_poll()
+
+
 @app.get("/")
 def root():
-    return {"status": "ok", "endpoints": ["/live-states", "/predictions"]}
+    return {"status": "ok", "endpoints": ["/live-states", "/history", "/predictions"]}
 
 
 @app.get("/live-states")
 def live_states():
-    try:
-        return fetch_live_states()
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"OpenSky request failed: {exc}") from exc
+    latest = get_latest()
+    if latest is None:
+        raise HTTPException(status_code=503, detail="No live data yet -- still fetching the first snapshot")
+    return latest
+
+
+@app.get("/history")
+def history():
+    return {"snapshots": get_history()}
 
 
 @app.get("/predictions")
 def predictions():
-    try:
-        states = fetch_live_states()
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"OpenSky request failed: {exc}") from exc
+    states = get_latest()
+    if states is None:
+        raise HTTPException(status_code=503, detail="No live data yet -- still fetching the first snapshot")
 
     airports = list(AIRPORT_COORDS)
     # the 7 weather calls are independent and network-bound -- fire them concurrently
