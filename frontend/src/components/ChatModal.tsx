@@ -7,11 +7,16 @@ interface Message {
   content: string;
 }
 
-const SUGGESTIONS = [
+const STARTERS = [
   "what's the riskiest airport right now",
   "tell me about the highest aircraft nearby",
   "is Munich's risk trending up or down",
 ];
+
+// generic ops-desk follow-ups shown after the latest answer, not personalized to its
+// content (that would need an extra LLM call) but still a genuinely useful "what would
+// I ask next" nudge -- the agent resolves "that"/"it" against the conversation itself.
+const FOLLOWUPS = ["why is that?", "check the trend", "any other airports I should watch?"];
 
 function AssistantBubble({ content, isLatest }: { content: string; isLatest: boolean }) {
   const shown = useTypewriter(content, isLatest ? 14 : 0);
@@ -25,7 +30,10 @@ function AssistantBubble({ content, isLatest }: { content: string; isLatest: boo
   );
 }
 
-export default function ChatModal({ onClose }: { onClose: () => void }) {
+export default function ChatModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  // deliberately kept mounted even while closed (see BriefingPanel) so this state --
+  // message history, thread_id -- survives closing and reopening the chat instead of
+  // starting over every time
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [asking, setAsking] = useState(false);
@@ -34,17 +42,19 @@ export default function ChatModal({ onClose }: { onClose: () => void }) {
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    if (!open) return;
     inputRef.current?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [open, onClose]);
 
   useEffect(() => {
+    if (!open) return;
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, asking]);
+  }, [open, messages, asking]);
 
   async function send(text: string) {
     const q = text.trim();
@@ -70,7 +80,7 @@ export default function ChatModal({ onClose }: { onClose: () => void }) {
   const lastAssistantId = [...messages].reverse().find((m) => m.role === "assistant")?.id;
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-[#08090af5] backdrop-blur-sm">
+    <div className={`fixed inset-0 z-50 flex-col bg-[#08090af5] backdrop-blur-sm ${open ? "flex" : "hidden"}`}>
       <div className="flex items-center justify-between border-b border-[var(--panel-border)] px-6 py-4">
         <div className="flex items-baseline gap-3">
           <h2 className="text-sm font-semibold tracking-[0.02em] text-white">OPS AGENT</h2>
@@ -89,7 +99,7 @@ export default function ChatModal({ onClose }: { onClose: () => void }) {
               live data -- it doesn't guess.
             </p>
             <div className="flex flex-col gap-2">
-              {SUGGESTIONS.map((s) => (
+              {STARTERS.map((s) => (
                 <button
                   key={s}
                   onClick={() => send(s)}
@@ -123,6 +133,20 @@ export default function ChatModal({ onClose }: { onClose: () => void }) {
                 className="h-1.5 w-1.5 rounded-full bg-[var(--text-dim)]"
                 style={{ animation: "pulse-dot 1.2s ease-in-out infinite", animationDelay: `${i * 0.15}s` }}
               />
+            ))}
+          </div>
+        )}
+
+        {!asking && lastAssistantId && (
+          <div className="fade-in flex flex-wrap gap-2 self-start pl-1">
+            {FOLLOWUPS.map((s) => (
+              <button
+                key={s}
+                onClick={() => send(s)}
+                className="rounded-full border border-[var(--panel-border)] px-3 py-1 text-[11px] text-[var(--text-dim)] hover:border-white/30 hover:text-[var(--text-mid)]"
+              >
+                {s}
+              </button>
             ))}
           </div>
         )}

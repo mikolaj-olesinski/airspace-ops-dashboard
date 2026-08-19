@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from langchain_core.tools import tool
 
+from agent.formatting import weather_line
 from backend.live_state_cache import get_latest
 from backend.predictions_history_cache import get_predictions_history
 from backend.predictions_service import compute_predictions
@@ -19,21 +20,26 @@ from backend.predictions_service import compute_predictions
 @tool
 def get_current_predictions() -> str:
     """Get the current delay-risk prediction for every tracked airport (EDDF, EPWA,
-    EGLL, LFPG, EHAM, EDDM, EPGD): risk score, risk level, live traffic count, and
-    current weather. Use this for questions about which airport is riskiest, or about
-    a specific airport's current conditions."""
+    EGLL, LFPG, EHAM, EDDM, EPGD): risk score, risk level, live traffic count, current
+    weather, and the model's own top real feature drivers for each prediction (not a
+    guess -- LightGBM's per-prediction attribution). Use this for questions about which
+    airport is riskiest, a specific airport's current conditions, or WHY an airport's
+    risk is what it is -- cite the top drivers given rather than speculating."""
     states = get_latest()
     if states is None:
         return "No live data available yet."
     preds = compute_predictions(states)
     lines = []
     for p in sorted(preds, key=lambda p: p["risk_score"], reverse=True):
-        w = p["weather"]
-        lines.append(
+        factors = p.get("top_factors") or []
+        factors_text = "; ".join(f"{f['label']} ({f['value']}) {f['direction']} risk" for f in factors)
+        line = (
             f"{p['airport']}: risk {round(p['risk_score'] * 100)}% ({p['risk_level']}), "
-            f"{p['live_traffic_count']} aircraft nearby, wind {w['wind_speed_10m']} km/h, "
-            f"temp {w['temperature_2m']}C, precip {w['precipitation']} mm"
+            f"{p['live_traffic_count']} aircraft nearby, {weather_line(p['weather'])}"
         )
+        if factors_text:
+            line += f", top model drivers: {factors_text}"
+        lines.append(line)
     return "\n".join(lines)
 
 

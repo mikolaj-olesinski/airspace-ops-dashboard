@@ -15,6 +15,14 @@
   box-sizing: border-box;
 }
 
+.radar-node {
+  outline: none;
+}
+.radar-node:focus-visible circle {
+  stroke: #60a5fa;
+  stroke-width: 2px;
+}
+
 html,
 body,
 #root {

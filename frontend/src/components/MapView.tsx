@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { Aircraft, AirportPrediction, PredictionsSnapshot } from "../lib/types";
 import type { Snapshot } from "../lib/history";
 import { AIRPORT_COORDS } from "../lib/airports";
+import { useAircraftRisk } from "../lib/api";
 import TimeSlider from "./TimeSlider";
 import Sparkline from "./Sparkline";
 
@@ -13,13 +14,38 @@ const RISK_COLOR: Record<string, string> = {
   high: "#f0563a",
 };
 
+// indexed by the numeric flight_category (0=VFR best .. 3=LIFR worst) the API returns
+// -- the label text itself comes from the API too (flight_category_label), not
+// duplicated here; this is just the presentation color per severity level
+const FLIGHT_CATEGORY_COLOR = ["#8b8f98", "#f5a623", "#f0563a", "#d946ef"];
+
 const TRAIL_LENGTH = 15;
+// how long a freshly-polled real position takes to fully absorb into the dead-reckoned
+// simulation (see the animation loop below) -- short on purpose, just enough to avoid a
+// visible snap when OpenSky's real position doesn't exactly match where extrapolation
+// predicted it would be
+const CORRECTION_MS = 2500;
 
 type Pos = { lon: number; lat: number; heading: number };
+type Kinematic = Pos & { vLon: number; vLat: number }; // degrees per second
 type Selection =
   | { kind: "aircraft"; id: string }
   | { kind: "airport"; code: string }
   | null;
+
+/** Converts a reported ground speed (m/s) + heading (degrees, clockwise from north)
+ * into a lat/lon rate of change, so aircraft can keep advancing smoothly between polls
+ * at their actual reported speed instead of a fixed-duration ease toward a stale target.
+ * This is exactly what real radar displays do between hits ("dead reckoning"). */
+function velocityToDegPerSec(lat: number, speedMs: number, headingDeg: number) {
+  if (!speedMs) return { vLon: 0, vLat: 0 };
+  const rad = (headingDeg * Math.PI) / 180;
+  const northMs = speedMs * Math.cos(rad);
+  const eastMs = speedMs * Math.sin(rad);
+  const metersPerDegLat = 111_320;
+  const metersPerDegLon = 111_320 * Math.cos((lat * Math.PI) / 180);
+  return { vLat: northMs / metersPerDegLat, vLon: eastMs / metersPerDegLon };
+}
 
 function makePlaneIcon(fill: string): ImageData {
   const s = 32;
@@ -76,9 +102,13 @@ function emptyLine() {
 interface MapViewProps {
   aircraft: Aircraft[];
   predictions: AirportPrediction[];
-  /** how long the position-interpolation animation should take to reach the new
-   * aircraft prop -- long (matching the poll interval) when tracking live data, short
-   * when stepping through history during scrub/playback so movement stays visible */
+  /** true while tracking live data (dead-reckoning between polls, see the animation
+   * loop below); false while scrubbing/replaying history, where each step is a discrete
+   * past snapshot and a short ease -- not physics-based extrapolation -- is what should
+   * carry the view between them. */
+  live: boolean;
+  /** ease duration between historical snapshots while scrubbing/playing back; unused
+   * in live mode. */
   transitionMs?: number;
   history: Snapshot[];
   predictionsHistory: PredictionsSnapshot[];
@@ -87,12 +117,20 @@ interface MapViewProps {
   onScrub: (index: number) => void;
   onTogglePlay: () => void;
   onGoLive: () => void;
+  /** the airport filter chip row (AirportFilter.tsx) -- selecting it there flies the
+   * camera to that airport and opens its card; clicking an airport on the map does the
+   * reverse, syncing the chip row so every other chart filters too. */
+  selectedAirport?: string | null;
+  onSelectAirport?: (code: string | null) => void;
+  /** forwarded to TimeSlider's "next update in Xs" countdown -- see its docstring */
+  pollIntervalS?: number;
 }
 
 export default function MapView({
   aircraft,
   predictions,
-  transitionMs = 11_000,
+  live,
+  transitionMs = 450,
   history,
   predictionsHistory,
   scrubIndex,
@@ -100,13 +138,28 @@ export default function MapView({
   onScrub,
   onTogglePlay,
   onGoLive,
+  selectedAirport: selectedAirportProp = null,
+  onSelectAirport,
+  pollIntervalS,
 }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
-  const prevPos = useRef<Map<string, Pos>>(new Map());
-  const targetPos = useRef<Map<string, Pos>>(new Map());
+  // live mode: each aircraft's own extrapolated position + velocity, advanced every
+  // frame (see the continuous render loop below), plus a short blend-in whenever a
+  // freshly polled real position lands (correction)
+  const kinematics = useRef<Map<string, Kinematic>>(new Map());
+  const correction = useRef<Map<string, { fromLon: number; fromLat: number; startedAt: number }>>(new Map());
+  // scrub/playback mode: the old discrete ease-between-two-snapshots approach
+  const scrubPrev = useRef<Map<string, Pos>>(new Map());
+  const scrubTarget = useRef<Map<string, Pos>>(new Map());
+  const scrubAnimStart = useRef(0);
+  const lastFrameTime = useRef<number | null>(null);
+  const liveRef = useRef(live);
+  liveRef.current = live;
+  const transitionMsRef = useRef(transitionMs);
+  transitionMsRef.current = transitionMs;
+
   const trailHistory = useRef<Map<string, [number, number][]>>(new Map());
-  const animFrame = useRef<number | null>(null);
   const predictionsRef = useRef(predictions);
   predictionsRef.current = predictions;
   const aircraftById = useRef<Map<string, Aircraft>>(new Map());
@@ -114,6 +167,12 @@ export default function MapView({
   const [selected, setSelected] = useState<Selection>(null);
   const selectedRef = useRef<Selection>(null);
   selectedRef.current = selected;
+  const onSelectAirportRef = useRef(onSelectAirport);
+  onSelectAirportRef.current = onSelectAirport;
+  // tracks the airport code we last pushed to/pulled from the App-level filter, so the
+  // sync effect below doesn't re-fly the camera to an airport the user just clicked
+  // directly on the map (which already centered it)
+  const appliedAirportRef = useRef<string | null>(null);
 
   // map init (once)
   useEffect(() => {
@@ -223,16 +282,115 @@ export default function MapView({
         if (hit.layer.id.startsWith("aircraft")) {
           setSelected({ kind: "aircraft", id: hit.properties!.id as string });
         } else {
-          setSelected({ kind: "airport", code: hit.properties!.code as string });
+          const code = hit.properties!.code as string;
+          appliedAirportRef.current = code;
+          setSelected({ kind: "airport", code });
+          onSelectAirportRef.current?.(code);
         }
       });
     });
 
     return () => {
-      if (animFrame.current) cancelAnimationFrame(animFrame.current);
       map.remove();
     };
   }, []);
+
+  // continuous render loop, independent of when new poll data actually arrives: in live
+  // mode it advances every aircraft's position each frame using its own reported speed
+  // and heading (dead reckoning), so movement is smooth and immediate instead of a slow
+  // multi-second glide toward a stale target; in scrub mode it eases between the two
+  // most recent historical snapshots instead
+  useEffect(() => {
+    let raf: number;
+    const frame = (now: number) => {
+      const map = mapRef.current;
+      const src = map?.getSource("aircraft") as maplibregl.GeoJSONSource | undefined;
+      if (src) {
+        const rendered = new Map<string, Pos>();
+        if (liveRef.current) {
+          const dt = lastFrameTime.current != null ? (now - lastFrameTime.current) / 1000 : 0;
+          for (const [id, k] of kinematics.current) {
+            k.lon += k.vLon * dt;
+            k.lat += k.vLat * dt;
+            let lon = k.lon;
+            let lat = k.lat;
+            const corr = correction.current.get(id);
+            if (corr) {
+              const t = Math.min(1, (now - corr.startedAt) / CORRECTION_MS);
+              lon = corr.fromLon + (k.lon - corr.fromLon) * t;
+              lat = corr.fromLat + (k.lat - corr.fromLat) * t;
+              if (t >= 1) correction.current.delete(id);
+            }
+            rendered.set(id, { lon, lat, heading: k.heading });
+          }
+        } else {
+          const t = Math.min(1, (now - scrubAnimStart.current) / transitionMsRef.current);
+          const eased = 1 - Math.pow(1 - t, 2);
+          for (const [id, target] of scrubTarget.current) {
+            const from = scrubPrev.current.get(id) ?? target;
+            rendered.set(id, {
+              lon: from.lon + (target.lon - from.lon) * eased,
+              lat: from.lat + (target.lat - from.lat) * eased,
+              heading: target.heading,
+            });
+          }
+        }
+        src.setData(aircraftToFeatures(rendered, selectedRef.current?.kind === "aircraft" ? selectedRef.current.id : null));
+      }
+      lastFrameTime.current = now;
+      raf = requestAnimationFrame(frame);
+    };
+    raf = requestAnimationFrame(frame);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  // feed new poll/scrub data into the render loop above: live mode updates each
+  // aircraft's extrapolation (speed+heading) and starts a short correction blend from
+  // wherever dead-reckoning currently thinks it is; scrub mode just sets up a new
+  // two-point ease like before
+  useEffect(() => {
+    aircraftById.current = new Map(aircraft.map((a) => [a.icao24, a]));
+    const now = performance.now();
+
+    if (live) {
+      const seen = new Set<string>();
+      for (const a of aircraft) {
+        if (a.latitude == null || a.longitude == null) continue;
+        seen.add(a.icao24);
+        const { vLon, vLat } = velocityToDegPerSec(a.latitude, a.velocity ?? 0, a.true_track ?? 0);
+        const prevK = kinematics.current.get(a.icao24);
+        if (prevK) {
+          correction.current.set(a.icao24, { fromLon: prevK.lon, fromLat: prevK.lat, startedAt: now });
+        }
+        kinematics.current.set(a.icao24, { lon: a.longitude, lat: a.latitude, heading: a.true_track ?? 0, vLon, vLat });
+
+        const hist = trailHistory.current.get(a.icao24) ?? [];
+        hist.push([a.longitude, a.latitude]);
+        if (hist.length > TRAIL_LENGTH) hist.shift();
+        trailHistory.current.set(a.icao24, hist);
+      }
+      for (const id of [...kinematics.current.keys()]) {
+        if (!seen.has(id)) {
+          kinematics.current.delete(id);
+          correction.current.delete(id);
+        }
+      }
+    } else {
+      const nextTarget = new Map<string, Pos>();
+      for (const a of aircraft) {
+        if (a.latitude == null || a.longitude == null) continue;
+        nextTarget.set(a.icao24, { lon: a.longitude, lat: a.latitude, heading: a.true_track ?? 0 });
+
+        const hist = trailHistory.current.get(a.icao24) ?? [];
+        hist.push([a.longitude, a.latitude]);
+        if (hist.length > TRAIL_LENGTH) hist.shift();
+        trailHistory.current.set(a.icao24, hist);
+      }
+      scrubPrev.current = scrubTarget.current.size ? new Map(scrubTarget.current) : new Map(nextTarget);
+      scrubTarget.current = nextTarget;
+      scrubAnimStart.current = now;
+    }
+  }, [aircraft, live]);
 
   // update airport risk colors when predictions change
   useEffect(() => {
@@ -241,6 +399,23 @@ export default function MapView({
     const src = map.getSource("airports") as maplibregl.GeoJSONSource | undefined;
     src?.setData(airportFeatures(predictions));
   }, [predictions]);
+
+  // pull the airport filter chip's selection in: fly the camera there and open its
+  // card, unless we're the one who just pushed this same code out (see click handler)
+  useEffect(() => {
+    if (selectedAirportProp === appliedAirportRef.current) return;
+    appliedAirportRef.current = selectedAirportProp;
+    const map = mapRef.current;
+    if (selectedAirportProp) {
+      setSelected({ kind: "airport", code: selectedAirportProp });
+      const coords = AIRPORT_COORDS[selectedAirportProp];
+      if (map && coords) {
+        map.flyTo({ center: [coords[1], coords[0]], zoom: Math.max(map.getZoom(), 6), speed: 0.8 });
+      }
+    } else {
+      setSelected((s) => (s?.kind === "airport" ? null : s));
+    }
+  }, [selectedAirportProp]);
 
   // clear the selected aircraft's trail if it's no longer selected
   useEffect(() => {
@@ -260,63 +435,8 @@ export default function MapView({
     }
   }, [selected]);
 
-  // animate aircraft positions smoothly between polls instead of snapping
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-
-    aircraftById.current = new Map(aircraft.map((a) => [a.icao24, a]));
-
-    const nextTarget = new Map<string, Pos>();
-    for (const a of aircraft) {
-      if (a.latitude == null || a.longitude == null) continue;
-      nextTarget.set(a.icao24, {
-        lon: a.longitude,
-        lat: a.latitude,
-        heading: a.true_track ?? 0,
-      });
-
-      const hist = trailHistory.current.get(a.icao24) ?? [];
-      hist.push([a.longitude, a.latitude]);
-      if (hist.length > TRAIL_LENGTH) hist.shift();
-      trailHistory.current.set(a.icao24, hist);
-    }
-
-    prevPos.current = targetPos.current.size ? new Map(targetPos.current) : new Map(nextTarget);
-    targetPos.current = nextTarget;
-
-    if (animFrame.current) cancelAnimationFrame(animFrame.current);
-    const durationMs = transitionMs;
-    const start = performance.now();
-
-    const step = (now: number) => {
-      const t = Math.min(1, (now - start) / durationMs);
-      const eased = 1 - Math.pow(1 - t, 2);
-      const interpolated = new Map<string, Pos>();
-
-      for (const [id, target] of targetPos.current) {
-        const from = prevPos.current.get(id) ?? target;
-        interpolated.set(id, {
-          lon: from.lon + (target.lon - from.lon) * eased,
-          lat: from.lat + (target.lat - from.lat) * eased,
-          heading: target.heading,
-        });
-      }
-
-      const src = map.getSource("aircraft") as maplibregl.GeoJSONSource | undefined;
-      src?.setData(aircraftToFeatures(interpolated, selectedRef.current?.kind === "aircraft" ? selectedRef.current.id : null));
-
-      if (t < 1) animFrame.current = requestAnimationFrame(step);
-    };
-    animFrame.current = requestAnimationFrame(step);
-
-    return () => {
-      if (animFrame.current) cancelAnimationFrame(animFrame.current);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [aircraft, transitionMs]);
-
   const selectedAircraft = selected?.kind === "aircraft" ? aircraftById.current.get(selected.id) : null;
+  const { data: aircraftRisk } = useAircraftRisk(selected?.kind === "aircraft" ? selected.id : null);
   const selectedAirport =
     selected?.kind === "airport" ? predictions.find((p) => p.airport === selected.code) : null;
 
@@ -376,6 +496,49 @@ export default function MapView({
             <span className="text-[10px] uppercase tracking-[0.1em] text-[var(--text-dim)]">speed (m/s)</span>
             <Sparkline values={speedTrend} width={208} height={32} color="#a78bfa" />
           </div>
+
+          {aircraftRisk && (
+            <div className="mt-2 border-t border-[var(--panel-border)] pt-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] uppercase tracking-[0.1em] text-[var(--text-dim)]">
+                  if departing {aircraftRisk.nearest_airport} now
+                </span>
+                <span className="font-num text-xs font-semibold" style={{ color: RISK_COLOR[aircraftRisk.risk_level] }}>
+                  {Math.round(aircraftRisk.risk_score * 100)}%
+                </span>
+              </div>
+              <dl className="mt-1.5 space-y-1 text-[11px]">
+                <Row
+                  label="type"
+                  value={
+                    aircraftRisk.aircraft_info.model
+                      ? `${aircraftRisk.aircraft_info.model} (${aircraftRisk.aircraft_info.typecode})`
+                      : (aircraftRisk.aircraft_info.typecode ?? "n/a")
+                  }
+                />
+                {aircraftRisk.aircraft_info.operator && (
+                  <Row label="operator" value={aircraftRisk.aircraft_info.operator} />
+                )}
+                {aircraftRisk.aircraft_info.registration && (
+                  <Row label="registration" value={aircraftRisk.aircraft_info.registration} />
+                )}
+              </dl>
+              {aircraftRisk.top_factors.length > 0 && (
+                <ul className="mt-1.5 space-y-1">
+                  {aircraftRisk.top_factors.map((f) => (
+                    <li key={f.feature} className="flex items-start gap-1.5 text-[11px] text-[#d1d5db]">
+                      <span className={f.direction === "increases" ? "text-[var(--risk-high)]" : "text-[var(--risk-low)]"}>
+                        {f.direction === "increases" ? "▲" : "▼"}
+                      </span>
+                      <span>
+                        {f.label} <span className="text-[var(--text-dim)]">({f.value})</span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -383,24 +546,69 @@ export default function MapView({
         <div className="fade-in tick-corners absolute top-3 left-3 w-56 border border-[var(--panel-border-strong)] bg-[#0a0b0cf0] p-3 backdrop-blur-sm">
           <div className="flex items-start justify-between">
             <span className="font-num text-sm font-semibold text-white">{selected.code}</span>
-            <button onClick={() => setSelected(null)} className="text-[var(--text-dim)] hover:text-white">
+            <button
+              onClick={() => {
+                appliedAirportRef.current = null;
+                setSelected(null);
+                onSelectAirportRef.current?.(null);
+              }}
+              className="text-[var(--text-dim)] hover:text-white"
+            >
               ✕
             </button>
           </div>
           {selectedAirport ? (
-            <dl className="mt-2 space-y-1 text-[11px]">
-              <Row label="risk score" value={`${Math.round(selectedAirport.risk_score * 100)}%`} />
-              <Row label="risk level" value={selectedAirport.risk_level} />
-              <Row label="live traffic" value={`${selectedAirport.live_traffic_count} aircraft`} />
-              <Row
-                label="wind"
-                value={selectedAirport.weather.wind_speed_10m != null ? `${selectedAirport.weather.wind_speed_10m} km/h` : "n/a"}
-              />
-              <Row
-                label="temp"
-                value={selectedAirport.weather.temperature_2m != null ? `${selectedAirport.weather.temperature_2m}°C` : "n/a"}
-              />
-            </dl>
+            <>
+              <dl className="mt-2 space-y-1 text-[11px]">
+                <Row label="risk score" value={`${Math.round(selectedAirport.risk_score * 100)}%`} />
+                <Row label="risk level" value={selectedAirport.risk_level} />
+                <Row label="live traffic" value={`${selectedAirport.live_traffic_count} aircraft`} />
+                <Row
+                  label="wind"
+                  value={selectedAirport.weather.wind_speed_10m != null ? `${selectedAirport.weather.wind_speed_10m} km/h` : "n/a"}
+                />
+                <Row
+                  label="temp"
+                  value={selectedAirport.weather.temperature_2m != null ? `${selectedAirport.weather.temperature_2m}°C` : "n/a"}
+                />
+                {selectedAirport.metar?.flight_category != null && (
+                  <Row
+                    label="flight cat."
+                    value={
+                      <span style={{ color: FLIGHT_CATEGORY_COLOR[selectedAirport.metar.flight_category] }}>
+                        {selectedAirport.metar.flight_category_label}
+                      </span>
+                    }
+                  />
+                )}
+                {selectedAirport.metar?.visibility_mi != null && (
+                  <Row label="visibility" value={`${selectedAirport.metar.visibility_mi.toFixed(1)} mi`} />
+                )}
+                {selectedAirport.metar?.ceiling_ft != null && (
+                  <Row
+                    label="ceiling"
+                    value={selectedAirport.metar.ceiling_ft >= 12_000 ? "unlimited" : `${Math.round(selectedAirport.metar.ceiling_ft)} ft`}
+                  />
+                )}
+              </dl>
+              {selectedAirport.top_factors.length > 0 && (
+                <div className="mt-2 border-t border-[var(--panel-border)] pt-2">
+                  <span className="text-[10px] uppercase tracking-[0.1em] text-[var(--text-dim)]">why</span>
+                  <ul className="mt-1 space-y-1">
+                    {selectedAirport.top_factors.map((f) => (
+                      <li key={f.feature} className="flex items-start gap-1.5 text-[11px] text-[#d1d5db]">
+                        <span className={f.direction === "increases" ? "text-[var(--risk-high)]" : "text-[var(--risk-low)]"}>
+                          {f.direction === "increases" ? "▲" : "▼"}
+                        </span>
+                        <span>
+                          {f.label} <span className="text-[var(--text-dim)]">({f.value})</span>
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </>
           ) : (
             <p className="mt-2 text-[11px] text-[var(--text-dim)]">waiting for prediction...</p>
           )}
@@ -423,12 +631,13 @@ export default function MapView({
         onScrub={onScrub}
         onTogglePlay={onTogglePlay}
         onGoLive={onGoLive}
+        pollIntervalS={pollIntervalS}
       />
     </div>
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+function Row({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className="flex items-center justify-between">
       <dt className="text-[var(--text-dim)]">{label}</dt>

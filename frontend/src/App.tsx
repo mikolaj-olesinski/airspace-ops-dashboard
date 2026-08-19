@@ -8,13 +8,21 @@ import RiskRadar from "./components/RiskRadar";
 import BriefingPanel from "./components/BriefingPanel";
 import AreaChart from "./components/AreaChart";
 import FeatureImportanceChart from "./components/FeatureImportanceChart";
+import AirportFilter from "./components/AirportFilter";
+import LiveDeltas from "./components/LiveDeltas";
 import { useLiveStates, usePredictions, usePredictionsHistory } from "./lib/api";
 import { useAircraftHistory, type Snapshot } from "./lib/history";
+import { AIRPORT_COORDS } from "./lib/airports";
+
+// matches backend/opensky_client.py's count_aircraft_near default -- keeps the
+// per-airport "aircraft near X" figures consistent between frontend and backend
+const AIRPORT_RADIUS_DEG = 0.5;
 
 const PLAYBACK_STEP_MS = 450;
-// matches live_state_cache.py's POLL_INTERVAL_S (90s), minus a margin so a glide
-// finishes before the next snapshot lands rather than getting cut off mid-motion
-const LIVE_TRANSITION_MS = 85_000;
+// matches backend/live_state_cache.py's POLL_INTERVAL_S -- shown as a countdown so the
+// ~90s cadence (forced by OpenSky's free-tier credit budget, see that module's
+// docstring) reads as "next update in Xs" instead of looking stuck
+const LIVE_POLL_INTERVAL_S = 90;
 
 export default function App() {
   const { data: liveStates, error: liveError } = useLiveStates();
@@ -37,6 +45,7 @@ export default function App() {
 
   const [scrubIndex, setScrubIndex] = useState<number | null>(null); // null == live
   const [playing, setPlaying] = useState(false);
+  const [selectedAirport, setSelectedAirport] = useState<string | null>(null);
   const historyLenRef = useRef(0);
   historyLenRef.current = history.length;
 
@@ -75,9 +84,32 @@ export default function App() {
   const displayedAircraft = scrubIndex !== null && history[scrubIndex] ? history[scrubIndex].aircraft : aircraft;
   const isScrubbing = scrubIndex !== null;
 
+  // Airspace Load series: total aircraft in the whole tracked bbox by default, or --
+  // when an airport is filtered -- just the aircraft within radar range of it, recomputed
+  // client-side from the same snapshots (no extra backend call needed)
+  const loadValues = useMemo(() => {
+    if (!selectedAirport) return history.map((s) => s.aircraft.length);
+    const [lat, lon] = AIRPORT_COORDS[selectedAirport];
+    return history.map(
+      (s) =>
+        s.aircraft.filter(
+          (a) =>
+            a.latitude != null &&
+            a.longitude != null &&
+            Math.abs(a.latitude - lat) <= AIRPORT_RADIUS_DEG &&
+            Math.abs(a.longitude - lon) <= AIRPORT_RADIUS_DEG,
+        ).length,
+    );
+  }, [history, selectedAirport]);
+
+  const focusRisk = selectedAirport ? preds.find((p) => p.airport === selectedAirport) : topRisk;
+  const trackedCount = selectedAirport ? (loadValues[loadValues.length - 1] ?? 0) : aircraft.length;
+
   return (
     <div className="flex h-full flex-col">
       <Header isLive={!liveError && !!liveStates} />
+      <AirportFilter selected={selectedAirport} onSelect={setSelectedAirport} predictions={preds} />
+      <LiveDeltas history={predictionsHistory} />
 
       <main
         className="grid flex-1 gap-3 overflow-y-auto p-3"
@@ -97,7 +129,8 @@ export default function App() {
             <MapView
               aircraft={displayedAircraft}
               predictions={preds}
-              transitionMs={isScrubbing ? PLAYBACK_STEP_MS : LIVE_TRANSITION_MS}
+              live={!isScrubbing}
+              transitionMs={PLAYBACK_STEP_MS}
               history={history}
               predictionsHistory={predictionsHistory}
               scrubIndex={scrubIndex}
@@ -105,32 +138,35 @@ export default function App() {
               onScrub={handleScrub}
               onTogglePlay={handleTogglePlay}
               onGoLive={handleGoLive}
+              selectedAirport={selectedAirport}
+              onSelectAirport={setSelectedAirport}
+              pollIntervalS={LIVE_POLL_INTERVAL_S}
             />
           </Panel>
         </div>
 
         <div style={{ gridArea: "gauge1" }} className="min-h-0">
-          <Panel label="Aircraft Tracked" className="h-full">
+          <Panel label="Aircraft Tracked" sublabel={selectedAirport ? `near ${selectedAirport}` : undefined} className="h-full">
             <StatGauge
-              value={aircraft.length}
-              max={Math.max(300, aircraft.length)}
+              value={trackedCount}
+              max={Math.max(selectedAirport ? 60 : 300, trackedCount)}
               format={(v) => String(Math.round(v))}
-              label="in region"
+              label={selectedAirport ? `near ${selectedAirport}` : "in region"}
             />
           </Panel>
         </div>
 
         <div style={{ gridArea: "gauge2" }} className="min-h-0">
-          <Panel label="Peak Risk" className="h-full">
+          <Panel label={selectedAirport ? "Airport Risk" : "Peak Risk"} className="h-full">
             <StatGauge
-              value={topRisk?.risk_score ?? 0}
+              value={focusRisk?.risk_score ?? 0}
               max={1}
-              format={(v) => (topRisk ? `${Math.round(v * 100)}%` : "--")}
-              label={topRisk?.airport ?? "n/a"}
+              format={(v) => (focusRisk ? `${Math.round(v * 100)}%` : "--")}
+              label={focusRisk?.airport ?? "n/a"}
               color={
-                topRisk?.risk_level === "high"
+                focusRisk?.risk_level === "high"
                   ? "var(--risk-high)"
-                  : topRisk?.risk_level === "medium"
+                  : focusRisk?.risk_level === "medium"
                     ? "var(--risk-medium)"
                     : "var(--risk-low)"
               }
@@ -140,19 +176,23 @@ export default function App() {
 
         <div style={{ gridArea: "bars" }} className="min-h-0">
           <Panel label="Delay Risk / Airport" className="h-full">
-            <RiskBars predictions={preds} history={predictionsHistory} />
+            <RiskBars predictions={preds} history={predictionsHistory} selectedAirport={selectedAirport} onSelect={setSelectedAirport} />
           </Panel>
         </div>
 
         <div style={{ gridArea: "radar" }} className="min-h-0">
           <Panel label="Risk Profile" className="h-full" bodyClassName="flex items-center">
-            <RiskRadar predictions={preds} />
+            <RiskRadar predictions={preds} selectedAirport={selectedAirport} onSelect={setSelectedAirport} />
           </Panel>
         </div>
 
         <div style={{ gridArea: "load" }} className="min-h-0">
-          <Panel label="Airspace Load" sublabel="aircraft tracked over time" className="h-full">
-            <AreaChart values={history.map((s) => s.aircraft.length)} color="#e5e7eb" unit="aircraft" />
+          <Panel
+            label="Airspace Load"
+            sublabel={selectedAirport ? `aircraft near ${selectedAirport} over time` : "aircraft tracked over time"}
+            className="h-full"
+          >
+            <AreaChart values={loadValues} timestamps={history.map((s) => s.time)} color="#e5e7eb" unit="aircraft" />
           </Panel>
         </div>
 
@@ -163,8 +203,8 @@ export default function App() {
         </div>
 
         <div style={{ gridArea: "briefing" }} className="min-h-0">
-          <Panel label="Ops Briefing" className="h-full">
-            <BriefingPanel />
+          <Panel label={selectedAirport ? `${selectedAirport} Briefing` : "Ops Briefing"} className="h-full">
+            <BriefingPanel selectedAirport={selectedAirport} />
           </Panel>
         </div>
       </main>

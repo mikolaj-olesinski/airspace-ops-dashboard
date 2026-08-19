@@ -5,7 +5,7 @@ briefing on a much slower cadence (e.g. every 60s)."""
 import time
 from typing import Optional
 
-from agent.briefing_agent import generate
+from agent.briefing_agent import generate, generate_for_airport
 
 CACHE_TTL_S = 60
 
@@ -20,3 +20,20 @@ def get_briefing(predictions: list[dict]) -> dict:
         _cached_text = generate(predictions)
         _cached_at = now
     return {"briefing": _cached_text, "generated_at": _cached_at}
+
+
+# shorter TTL than the all-airports briefing: this is generated on-demand right after a
+# user clicks an airport, so it should refresh faster than the passively-polled one
+AIRPORT_CACHE_TTL_S = 45
+_airport_cache: dict[str, tuple[str, float]] = {}
+
+
+def get_airport_briefing(prediction: dict, trend: list[int]) -> dict:
+    code = prediction["airport"]
+    now = time.time()
+    cached = _airport_cache.get(code)
+    if cached is None or (now - cached[1]) > AIRPORT_CACHE_TTL_S:
+        cached = (generate_for_airport(prediction, trend), now)
+        _airport_cache[code] = cached
+    text, generated_at = cached
+    return {"briefing": text, "generated_at": generated_at, "airport": code}

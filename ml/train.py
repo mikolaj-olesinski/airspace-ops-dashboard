@@ -1,21 +1,30 @@
 """Train a LightGBM classifier for delayed_15min risk and log everything to MLflow.
 
-Three-way time-based split (not random, and not just train/test):
-  - train_fit  (< VAL_CUTOFF)              -- fits each candidate model
-  - val        (VAL_CUTOFF .. TEST_CUTOFF) -- early stopping + hyperparameter selection
-                                               + picks the decision threshold
-  - test       (>= TEST_CUTOFF)            -- touched exactly once, for the final report
+Time-based (not random) split, in two parts:
+  - pre-test  (< TEST_CUTOFF)   -- everything hyperparameter selection is allowed to see
+  - test      (>= TEST_CUTOFF)  -- touched exactly once, for the final report
 
-Time-based (not random) because the rolling-window features would otherwise leak
-across a random split, and because this mirrors real deployment: predicting future
-delays from past patterns. A separate validation set (rather than the original
-baseline's train/test-only split) matters here specifically because early stopping and
-hyperparameter choice both make decisions FROM data -- letting those decisions watch
-the test set would quietly bias the "final" test metrics.
+Time-based because the rolling-window features would otherwise leak across a random
+split, and because this mirrors real deployment: predicting future delays from past
+patterns.
+
+Hyperparameter selection uses walk-forward (rolling-origin) cross-validation instead of
+a single static validation window: N_FOLDS consecutive FOLD_MONTHS-wide validation
+windows, each fold trained on an expanding window of everything before it and validated
+on the window right after -- e.g. train on 2023-01..2024-09, validate on 2024-09..12;
+train on 2023-01..2024-12, validate on 2025-01..03; and so on, ending with the fold
+right before TEST_CUTOFF. A single validation window risks picking hyperparameters that
+just happen to fit one arbitrary period's weather/seasonality; averaging PR-AUC across
+several rolling windows is a more honest estimate of how a config generalizes forward in
+time. This still never touches the held-out test set -- all folds live inside pre-test
+data, same as the original single-split design.
 
 A small hyperparameter search runs as nested MLflow child runs under a "hyperparam_
-search" parent; the winning config (by validation PR-AUC, more informative than AUC
-given the ~5% positive rate) is refit on all pre-test data and logged as "final_model".
+search_cv" parent; the winning config (by mean validation PR-AUC across folds, more
+informative than AUC given the ~5% positive rate) is refit on all pre-test data and
+logged as "final_model". The decision threshold is picked from the single most recent
+fold (the one immediately preceding TEST_CUTOFF) -- the most representative stand-in for
+"what's about to happen" without touching the actual test set.
 """
 
 import os
@@ -33,6 +42,7 @@ import lightgbm as lgb
 import matplotlib.pyplot as plt
 import mlflow
 import mlflow.lightgbm
+import numpy as np
 import pandas as pd
 from sklearn.metrics import (
     average_precision_score,
@@ -49,9 +59,13 @@ FEATURES_PATH = "data/processed/features-00000-of-00001.parquet"
 MLFLOW_TRACKING_URI = "file:./mlruns"
 MLFLOW_EXPERIMENT = "airspace-delay-risk"
 
-VAL_CUTOFF = "2025-06-01"   # last ~3 months before TEST_CUTOFF held out for tuning
-TEST_CUTOFF = "2025-09-01"  # last ~4 months held out as the final, untouched test set
+TEST_CUTOFF = "2025-09-01"  # everything from here on is the final, untouched test set
 CATEGORICAL_COLUMNS = ["adep", "typecode"]
+
+# walk-forward CV: N_FOLDS rolling validation windows of FOLD_MONTHS each, working
+# backward from TEST_CUTOFF -- see the module docstring
+N_FOLDS = 4
+FOLD_MONTHS = 3
 
 BASE_PARAMS = {
     "objective": "binary",
@@ -83,11 +97,18 @@ def load_data() -> pd.DataFrame:
     return df
 
 
-def three_way_split(df: pd.DataFrame):
-    train_fit = df[df["first_seen"] < VAL_CUTOFF]
-    val = df[(df["first_seen"] >= VAL_CUTOFF) & (df["first_seen"] < TEST_CUTOFF)]
-    test = df[df["first_seen"] >= TEST_CUTOFF]
-    return train_fit, val, test
+def rolling_fold_cutoffs(final_val_end: str, months: int, n_folds: int) -> list[tuple[str, str]]:
+    """n_folds consecutive [start, end) validation windows of `months` width, working
+    backward from final_val_end, oldest first. Each fold's implicit training set is
+    "everything before its own start" (expanding window) -- computed by the caller, not
+    here, since building it just needs the start date."""
+    end = pd.Timestamp(final_val_end)
+    cuts = []
+    for _ in range(n_folds):
+        start = end - pd.DateOffset(months=months)
+        cuts.append((start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")))
+        end = start
+    return list(reversed(cuts))
 
 
 def make_dataset(df: pd.DataFrame, reference=None) -> lgb.Dataset:
@@ -129,98 +150,147 @@ def plot_feature_importance(model: lgb.Booster, path: str) -> None:
     plt.close(fig)
 
 
-def run_search(train_fit: pd.DataFrame, val: pd.DataFrame):
-    base_pos_weight = (train_fit[TARGET_COLUMN] == 0).sum() / (train_fit[TARGET_COLUMN] == 1).sum()
-    train_set = make_dataset(train_fit)
-    val_set = make_dataset(val, reference=train_set)
-    y_val = val[TARGET_COLUMN]
-
+def run_search_cv(df: pd.DataFrame, fold_cutoffs: list[tuple[str, str]]):
+    """Walk-forward hyperparameter search: each candidate config is fit and scored on
+    every rolling fold, then ranked by its mean validation PR-AUC across folds (not a
+    single fold's score) -- see module docstring for why."""
     results = []
-    with mlflow.start_run(run_name="hyperparam_search"):
-        for i, cfg in enumerate(SEARCH_SPACE):
-            params = dict(BASE_PARAMS)
-            params["num_leaves"] = cfg["num_leaves"]
-            params["learning_rate"] = cfg["learning_rate"]
-            params["min_data_in_leaf"] = cfg["min_data_in_leaf"]
-            params["scale_pos_weight"] = base_pos_weight * cfg["pos_weight_mult"]
+    with mlflow.start_run(run_name="hyperparam_search_cv"):
+        mlflow.log_param("n_folds", len(fold_cutoffs))
+        mlflow.log_param("fold_cutoffs", str(fold_cutoffs))
 
+        for i, cfg in enumerate(SEARCH_SPACE):
             with mlflow.start_run(run_name=f"trial_{i}", nested=True):
-                mlflow.log_params({**params, "pos_weight_mult": cfg["pos_weight_mult"]})
-                model = lgb.train(
-                    params,
-                    train_set,
-                    num_boost_round=NUM_BOOST_ROUND,
-                    valid_sets=[val_set],
-                    valid_names=["val"],
-                    callbacks=[
-                        lgb.early_stopping(EARLY_STOPPING_ROUNDS, verbose=False),
-                        lgb.log_evaluation(0),
-                    ],
+                mlflow.log_params({**cfg})
+                fold_aucs, fold_pr_aucs, fold_iters = [], [], []
+
+                for fold_i, (val_start, val_end) in enumerate(fold_cutoffs):
+                    train_fold = df[df["first_seen"] < val_start]
+                    val_fold = df[(df["first_seen"] >= val_start) & (df["first_seen"] < val_end)]
+
+                    base_pos_weight = (
+                        (train_fold[TARGET_COLUMN] == 0).sum() / (train_fold[TARGET_COLUMN] == 1).sum()
+                    )
+                    params = dict(BASE_PARAMS)
+                    params["num_leaves"] = cfg["num_leaves"]
+                    params["learning_rate"] = cfg["learning_rate"]
+                    params["min_data_in_leaf"] = cfg["min_data_in_leaf"]
+                    params["scale_pos_weight"] = base_pos_weight * cfg["pos_weight_mult"]
+
+                    train_set = make_dataset(train_fold)
+                    val_set = make_dataset(val_fold, reference=train_set)
+                    model = lgb.train(
+                        params,
+                        train_set,
+                        num_boost_round=NUM_BOOST_ROUND,
+                        valid_sets=[val_set],
+                        valid_names=["val"],
+                        callbacks=[
+                            lgb.early_stopping(EARLY_STOPPING_ROUNDS, verbose=False),
+                            lgb.log_evaluation(0),
+                        ],
+                    )
+                    y_val_proba = model.predict(val_fold[FEATURE_COLUMNS], num_iteration=model.best_iteration)
+                    fold_auc = roc_auc_score(val_fold[TARGET_COLUMN], y_val_proba)
+                    fold_pr_auc = average_precision_score(val_fold[TARGET_COLUMN], y_val_proba)
+                    mlflow.log_metrics(
+                        {f"fold{fold_i}_val_auc": fold_auc, f"fold{fold_i}_val_pr_auc": fold_pr_auc}
+                    )
+                    fold_aucs.append(fold_auc)
+                    fold_pr_aucs.append(fold_pr_auc)
+                    fold_iters.append(model.best_iteration)
+
+                mean_auc, std_auc = float(np.mean(fold_aucs)), float(np.std(fold_aucs))
+                mean_pr_auc, std_pr_auc = float(np.mean(fold_pr_aucs)), float(np.std(fold_pr_aucs))
+                mean_iter = int(round(np.mean(fold_iters)))
+                mlflow.log_metrics(
+                    {
+                        "val_auc_mean": mean_auc,
+                        "val_auc_std": std_auc,
+                        "val_pr_auc_mean": mean_pr_auc,
+                        "val_pr_auc_std": std_pr_auc,
+                        "best_iteration_mean": mean_iter,
+                    }
                 )
-                y_val_proba = model.predict(val[FEATURE_COLUMNS], num_iteration=model.best_iteration)
-                val_auc = roc_auc_score(y_val, y_val_proba)
-                val_pr_auc = average_precision_score(y_val, y_val_proba)
-                mlflow.log_metrics({"val_auc": val_auc, "val_pr_auc": val_pr_auc})
-                mlflow.log_param("best_iteration", model.best_iteration)
 
                 print(
-                    f"trial {i}: {cfg} -> val_auc={val_auc:.4f} "
-                    f"val_pr_auc={val_pr_auc:.4f} (best_iter={model.best_iteration})"
+                    f"trial {i}: {cfg} -> val_pr_auc={mean_pr_auc:.4f} +/- {std_pr_auc:.4f} "
+                    f"(val_auc={mean_auc:.4f} +/- {std_auc:.4f}, over {len(fold_cutoffs)} folds, "
+                    f"mean_best_iter={mean_iter})"
                 )
                 results.append(
                     {
                         "cfg": cfg,
-                        "params": params,
-                        "val_auc": val_auc,
-                        "val_pr_auc": val_pr_auc,
-                        "best_iteration": model.best_iteration,
+                        "val_auc": mean_auc,
+                        "val_pr_auc": mean_pr_auc,
+                        "val_pr_auc_std": std_pr_auc,
+                        "best_iteration": mean_iter,
                     }
                 )
 
         best = max(results, key=lambda r: r["val_pr_auc"])
         mlflow.log_param("chosen_trial_cfg", str(best["cfg"]))
-        mlflow.log_metric("chosen_val_pr_auc", best["val_pr_auc"])
+        mlflow.log_metric("chosen_val_pr_auc_mean", best["val_pr_auc"])
+        mlflow.log_metric("chosen_val_pr_auc_std", best["val_pr_auc_std"])
 
-    print(f"\nbest config: {best['cfg']} (val_pr_auc={best['val_pr_auc']:.4f})")
+    print(f"\nbest config: {best['cfg']} (val_pr_auc={best['val_pr_auc']:.4f} +/- {best['val_pr_auc_std']:.4f})")
     return best
 
 
 def main():
     df = load_data()
-    train_fit, val, test = three_way_split(df)
-    print(f"train_fit: {len(train_fit):,} rows (< {VAL_CUTOFF})")
-    print(f"val:       {len(val):,} rows ({VAL_CUTOFF} -> {TEST_CUTOFF})")
-    print(f"test:      {len(test):,} rows (>= {TEST_CUTOFF})")
+    test = df[df["first_seen"] >= TEST_CUTOFF]
+    fold_cutoffs = rolling_fold_cutoffs(TEST_CUTOFF, FOLD_MONTHS, N_FOLDS)
+
+    print(f"walk-forward folds ({N_FOLDS} x {FOLD_MONTHS} months, expanding training window):")
+    for val_start, val_end in fold_cutoffs:
+        n_train = (df["first_seen"] < val_start).sum()
+        n_val = ((df["first_seen"] >= val_start) & (df["first_seen"] < val_end)).sum()
+        print(f"  train < {val_start}: {n_train:,} rows | val {val_start} -> {val_end}: {n_val:,} rows")
+    print(f"test:      {len(test):,} rows (>= {TEST_CUTOFF}, untouched until the very end)")
 
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT)
 
-    best = run_search(train_fit, val)
+    best = run_search_cv(df, fold_cutoffs)
 
-    # --- final refit on all pre-test data (train_fit + val), evaluated once on the
-    # untouched test set, using the winning hyperparameters and round count from search
+    # --- final refit on all pre-test data, evaluated once on the untouched test set,
+    # using the winning hyperparameters and mean round count from the CV folds
     train_final = df[df["first_seen"] < TEST_CUTOFF]
     train_final_set = make_dataset(train_final)
+    base_pos_weight = (train_final[TARGET_COLUMN] == 0).sum() / (train_final[TARGET_COLUMN] == 1).sum()
+    final_params = dict(BASE_PARAMS)
+    final_params["num_leaves"] = best["cfg"]["num_leaves"]
+    final_params["learning_rate"] = best["cfg"]["learning_rate"]
+    final_params["min_data_in_leaf"] = best["cfg"]["min_data_in_leaf"]
+    final_params["scale_pos_weight"] = base_pos_weight * best["cfg"]["pos_weight_mult"]
+
+    # most recent fold, right before TEST_CUTOFF -- the closest honest stand-in for
+    # "what's about to happen" without touching the actual held-out test set
+    thresh_start, thresh_end = fold_cutoffs[-1]
+    threshold_val = df[(df["first_seen"] >= thresh_start) & (df["first_seen"] < thresh_end)]
 
     with mlflow.start_run(run_name="final_model"):
-        mlflow.log_params(best["params"])
+        mlflow.log_params(final_params)
         mlflow.log_params(
             {
                 "num_boost_round": best["best_iteration"],
-                "val_cutoff": VAL_CUTOFF,
+                "n_folds": N_FOLDS,
+                "fold_months": FOLD_MONTHS,
                 "test_cutoff": TEST_CUTOFF,
                 "n_train_final": len(train_final),
                 "n_test": len(test),
             }
         )
 
-        final_model = lgb.train(best["params"], train_final_set, num_boost_round=best["best_iteration"])
+        final_model = lgb.train(final_params, train_final_set, num_boost_round=best["best_iteration"])
 
-        # threshold picked from validation (re-scored by the final model), never from test
-        y_val_proba = final_model.predict(val[FEATURE_COLUMNS])
-        threshold, val_f1 = best_threshold_by_f1(val[TARGET_COLUMN], y_val_proba)
+        # threshold picked from the most recent fold (re-scored by the final model),
+        # never from test
+        y_val_proba = final_model.predict(threshold_val[FEATURE_COLUMNS])
+        threshold, val_f1 = best_threshold_by_f1(threshold_val[TARGET_COLUMN], y_val_proba)
         mlflow.log_param("decision_threshold", threshold)
-        print(f"\ndecision threshold (best F1 on val): {threshold:.4f} (val_f1={val_f1:.4f})")
+        print(f"\ndecision threshold (best F1 on most recent fold): {threshold:.4f} (val_f1={val_f1:.4f})")
 
         y_test = test[TARGET_COLUMN]
         y_test_proba = final_model.predict(test[FEATURE_COLUMNS])

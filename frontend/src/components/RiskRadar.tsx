@@ -7,7 +7,15 @@ const RISK_COLOR: Record<string, string> = {
   high: "#f0563a",
 };
 
-export default function RiskRadar({ predictions }: { predictions: AirportPrediction[] }) {
+export default function RiskRadar({
+  predictions,
+  selectedAirport = null,
+  onSelect,
+}: {
+  predictions: AirportPrediction[];
+  selectedAirport?: string | null;
+  onSelect?: (code: string | null) => void;
+}) {
   const size = 220;
   const center = size / 2;
   const maxR = size / 2 - 28;
@@ -39,26 +47,55 @@ export default function RiskRadar({ predictions }: { predictions: AirportPredict
       })}
 
       <path d={dataPath} fill="rgba(229,231,235,0.08)" stroke="rgba(229,231,235,0.5)" strokeWidth={1.5} />
-      {predictions.map((p, i) => {
-        const [x, y] = pointAt(i, Math.max(0.06, p.risk_score));
-        return <circle key={p.airport} cx={x} cy={y} r={3} fill={RISK_COLOR[p.risk_level]} />;
-      })}
 
       {predictions.map((p, i) => {
-        const [x, y] = pointAt(i, 1.22);
+        const [dx, dy] = pointAt(i, Math.max(0.06, p.risk_score));
+        const [lx, ly] = pointAt(i, 1.22);
+        const active = selectedAirport === p.airport;
+        const dimmed = selectedAirport !== null && !active;
+        const select = () => onSelect?.(active ? null : p.airport);
         return (
-          <text
+          <g
             key={p.airport}
-            x={x}
-            y={y}
-            textAnchor="middle"
-            dominantBaseline="middle"
-            className="font-num"
-            fontSize={10}
-            fill="var(--text-mid)"
+            role={onSelect ? "button" : undefined}
+            tabIndex={onSelect ? 0 : undefined}
+            aria-label={onSelect ? `${p.airport}, ${Math.round(p.risk_score * 100)}% risk` : undefined}
+            aria-pressed={onSelect ? active : undefined}
+            className={onSelect ? "radar-node cursor-pointer" : undefined}
+            onClick={onSelect ? select : undefined}
+            onKeyDown={
+              onSelect
+                ? (e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      select();
+                    }
+                  }
+                : undefined
+            }
           >
-            {p.airport}
-          </text>
+            <circle
+              cx={dx}
+              cy={dy}
+              r={active ? 5 : 3}
+              fill={RISK_COLOR[p.risk_level]}
+              opacity={dimmed ? 0.35 : 1}
+              stroke={active ? "#ffffff" : "none"}
+              strokeWidth={active ? 1.5 : 0}
+            />
+            <text
+              x={lx}
+              y={ly}
+              textAnchor="middle"
+              dominantBaseline="middle"
+              className="font-num"
+              fontSize={10}
+              fill={active ? "#ffffff" : "var(--text-mid)"}
+              opacity={dimmed ? 0.5 : 1}
+            >
+              {p.airport}
+            </text>
+          </g>
         );
       })}
     </svg>

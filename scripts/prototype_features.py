@@ -9,10 +9,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ml.features import FEATURE_COLUMNS, TARGET_COLUMN, build_features, load_flights, load_weather
+from ml.features import FEATURE_COLUMNS, TARGET_COLUMN, build_features, load_flights, load_metar, load_weather
 
 FLIGHTS_PATH = "data/raw/eurocontrol_filtered"
 WEATHER_PATH = "data/raw/weather_2023_2025.parquet"
+METAR_PATH = "data/raw/metar_2023_2025.parquet"
 OUT_PATH = "data/processed/features_prototype.parquet"
 
 
@@ -26,9 +27,13 @@ def main():
     weather = load_weather(WEATHER_PATH)
     print(f"  {len(weather):,} rows", flush=True)
 
+    print("loading metar...", flush=True)
+    metar = load_metar(METAR_PATH)
+    print(f"  {len(metar):,} rows", flush=True)
+
     print("building features...", flush=True)
     t1 = time.time()
-    features = build_features(flights, weather)
+    features = build_features(flights, weather, metar)
     print(f"  done in {time.time() - t1:.0f}s, shape={features.shape}", flush=True)
 
     print("\n--- missing values ---")

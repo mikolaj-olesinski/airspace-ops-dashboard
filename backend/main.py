@@ -22,6 +22,9 @@ frontend uses for its time-slider and risk-trend sparklines):
   GET /agent/ask               -- free-text Q&A against a LangGraph ReAct agent
                                 (agent/qa_agent.py) with tools for live predictions,
                                 aircraft lookup, and risk trends (agent/tools.py)
+  GET /aircraft/{icao24}/risk  -- delay-risk prediction for ONE specific tracked
+                                aircraft, using its real aircraft type instead of the
+                                airport-level typecode=None (aircraft_risk_service.py)
 """
 
 import sys
@@ -33,7 +36,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from agent.qa_agent import ask as agent_ask
-from backend.briefing_cache import get_briefing
+from backend.aircraft_risk_service import AircraftRiskUnavailable, compute_aircraft_risk
+from backend.briefing_cache import get_airport_briefing, get_briefing
 from backend.live_state_cache import get_history, get_latest
 from backend.live_state_cache import start_background_poll as start_states_poll
 from backend.model_service import get_feature_importance, get_model
@@ -76,8 +80,10 @@ def root():
             "/predictions",
             "/predictions/history",
             "/briefing",
+            "/briefing/airport",
             "/agent/ask",
             "/model/feature-importance",
+            "/aircraft/{icao24}/risk",
         ],
     }
 
@@ -123,6 +129,42 @@ def briefing():
         return get_briefing(results)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Briefing generation failed: {exc}") from exc
+
+
+@app.get("/briefing/airport")
+def airport_briefing(code: str):
+    _states, results = _predictions_for_latest()
+    code = code.strip().upper()
+    prediction = next((p for p in results if p["airport"] == code), None)
+    if prediction is None:
+        raise HTTPException(status_code=404, detail=f"Unknown airport code: {code}")
+    trend = [
+        round(p["risk_score"] * 100)
+        for snap in get_predictions_history()
+        for p in snap["predictions"]
+        if p["airport"] == code
+    ]
+    try:
+        return get_airport_briefing(prediction, trend)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Airport briefing generation failed: {exc}") from exc
+
+
+@app.get("/aircraft/{icao24}/risk")
+def aircraft_risk(icao24: str):
+    states = get_latest()
+    if states is None:
+        raise HTTPException(status_code=503, detail="No live data yet -- still fetching the first snapshot")
+    icao24 = icao24.strip().lower()
+    aircraft = next((a for a in states["aircraft"] if a["icao24"] == icao24), None)
+    if aircraft is None:
+        raise HTTPException(status_code=404, detail=f"Aircraft {icao24} isn't in the current live snapshot")
+    try:
+        return compute_aircraft_risk(aircraft)
+    except AircraftRiskUnavailable as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Aircraft risk computation failed: {exc}") from exc
 
 
 @app.get("/agent/ask")

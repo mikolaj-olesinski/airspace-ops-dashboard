@@ -17,6 +17,12 @@ services:
       # will work.
       - ./mlruns:/app/mlruns
       - ./data:/app/data
+      # scripts/ and pipeline/ aren't imported by the running backend.main app (so
+      # they're not COPYed into the image), but they need to be runnable via
+      # `docker compose run --entrypoint python backend scripts/...` without a full
+      # image rebuild every time they change -- mounted read-write same as the others
+      - ./scripts:/app/scripts
+      - ./pipeline:/app/pipeline
 
   frontend:
     build:

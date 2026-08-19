@@ -21,6 +21,14 @@ def get_predictions_history() -> list[dict]:
     return list(_history)
 
 
+def get_latest_predictions() -> list[dict] | None:
+    """Just the most recent snapshot's per-airport predictions (with their already-
+    fetched live weather/METAR/traffic embedded) -- lets a one-off computation like
+    aircraft_risk_service.compute_aircraft_risk() reuse that context instead of
+    re-fetching live sources for a single click."""
+    return _history[-1]["predictions"] if _history else None
+
+
 async def _poll_loop():
     while True:
         states = get_latest()

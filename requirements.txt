@@ -1,6 +1,7 @@
 requests
 python-dotenv
 pandas
+holidays
 datasets
 huggingface_hub
 matplotlib

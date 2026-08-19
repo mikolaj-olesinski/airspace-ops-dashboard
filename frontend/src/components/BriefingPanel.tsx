@@ -1,11 +1,22 @@
 import { useState } from "react";
-import { useBriefing } from "../lib/api";
+import { useAirportBriefing, useBriefing } from "../lib/api";
 import { useTypewriter } from "../lib/useTypewriter";
 import ChatModal from "./ChatModal";
 
-export default function BriefingPanel() {
-  const { data, error, loading } = useBriefing();
-  const briefingText = data?.briefing ?? (loading ? "Generating briefing..." : error ? `Briefing unavailable: ${error}` : "");
+export default function BriefingPanel({ selectedAirport = null }: { selectedAirport?: string | null }) {
+  const general = useBriefing();
+  const airport = useAirportBriefing(selectedAirport);
+
+  const { data, error, loading } = selectedAirport ? airport : general;
+  const briefingText =
+    data?.briefing ??
+    (loading
+      ? selectedAirport
+        ? `Writing a briefing for ${selectedAirport}...`
+        : "Generating briefing..."
+      : error
+        ? `Briefing unavailable: ${error}`
+        : "");
   const shown = useTypewriter(briefingText);
   const [chatOpen, setChatOpen] = useState(false);
 
@@ -20,7 +31,7 @@ export default function BriefingPanel() {
 
       <div className="flex shrink-0 items-center justify-between border-t border-[var(--panel-border)] pt-2">
         <span className="text-[10px] uppercase tracking-[0.12em] text-[var(--text-dim)]">
-          LangGraph ops agent -- Claude Haiku
+          {selectedAirport ? `Focused on ${selectedAirport}` : "LangGraph ops agent -- Claude Haiku"}
         </span>
         <button
           onClick={() => setChatOpen(true)}
@@ -30,7 +41,9 @@ export default function BriefingPanel() {
         </button>
       </div>
 
-      {chatOpen && <ChatModal onClose={() => setChatOpen(false)} />}
+      {/* always mounted (never conditionally rendered) so ChatModal's own message
+          history and thread_id survive closing and reopening the chat */}
+      <ChatModal open={chatOpen} onClose={() => setChatOpen(false)} />
     </div>
   );
 }

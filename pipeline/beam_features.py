@@ -30,13 +30,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import apache_beam as beam
 import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
 from apache_beam.io.parquetio import ReadFromParquet, WriteToParquet
 from apache_beam.options.pipeline_options import PipelineOptions
 
-from ml.features import AIRPORTS, TRAFFIC_WINDOWS, rolling_traffic_for_airport
+from ml.features import AIRPORTS, TRAFFIC_WINDOWS, is_holiday, rolling_traffic_for_airport
 
 FLIGHTS_GLOB = "data/raw/eurocontrol_filtered/part_*.parquet"
 WEATHER_PATH = "data/raw/weather_2023_2025.parquet"
+METAR_PATH = "data/raw/metar_2023_2025.parquet"
 EXTRACTED_GLOB = "data/processed/_extracted_shard*.parquet"
 OUT_PATH_PREFIX = "data/processed/features"
 
@@ -60,9 +62,13 @@ EXTRACTED_SCHEMA = pa.schema(
         ("day_of_week", pa.int64()),
         ("month", pa.int64()),
         ("is_weekend", pa.int64()),
+        ("is_holiday", pa.int64()),
         ("temperature_2m", pa.float64()),
         ("precipitation", pa.float64()),
         ("wind_speed_10m", pa.float64()),
+        ("visibility_mi", pa.float64()),
+        ("ceiling_ft", pa.float64()),
+        ("flight_category", pa.float64()),
         ("typecode", pa.string()),
         ("delayed_15min", pa.int64()),
     ]
@@ -76,9 +82,13 @@ OUTPUT_SCHEMA = pa.schema(
         ("day_of_week", pa.int64()),
         ("month", pa.int64()),
         ("is_weekend", pa.int64()),
+        ("is_holiday", pa.int64()),
         ("temperature_2m", pa.float64()),
         ("precipitation", pa.float64()),
         ("wind_speed_10m", pa.float64()),
+        ("visibility_mi", pa.float64()),
+        ("ceiling_ft", pa.float64()),
+        ("flight_category", pa.float64()),
         ("traffic_1h", pa.float64()),
         ("traffic_3h", pa.float64()),
         ("delay_rate_1h", pa.float64()),
@@ -96,21 +106,32 @@ def add_time_features_row(row: dict) -> dict:
     row["day_of_week"] = ts.dayofweek
     row["month"] = ts.month
     row["is_weekend"] = int(row["day_of_week"] in (5, 6))
+    row["is_holiday"] = is_holiday(row["adep"], ts)
     return row
 
 
-def weather_key(adep: str, first_seen) -> tuple:
-    # Open-Meteo's hourly timestamps look like "2023-01-01T00:00" -> reuse that
-    # format as the join key instead of parsing weather['time'] back to a datetime.
+def hour_key(adep: str, first_seen) -> tuple:
+    # both fetch_weather.py's and fetch_metar.py's outputs use this same
+    # "2023-01-01T00:00" string shape for their hourly timestamp, so a single key
+    # format joins the flight row against either lookup.
     return (adep, first_seen.strftime("%Y-%m-%dT%H:00"))
 
 
 def join_weather_row(row: dict, weather_lookup: dict) -> dict:
     row = dict(row)
-    weather = weather_lookup.get(weather_key(row["adep"], row["first_seen"]))
+    weather = weather_lookup.get(hour_key(row["adep"], row["first_seen"]))
     row["temperature_2m"] = weather["temperature_2m"] if weather else None
     row["precipitation"] = weather["precipitation"] if weather else None
     row["wind_speed_10m"] = weather["wind_speed_10m"] if weather else None
+    return row
+
+
+def join_metar_row(row: dict, metar_lookup: dict) -> dict:
+    row = dict(row)
+    metar = metar_lookup.get(hour_key(row["adep"], row["first_seen"]))
+    row["visibility_mi"] = metar["visibility_mi"] if metar else None
+    row["ceiling_ft"] = metar["ceiling_ft"] if metar else None
+    row["flight_category"] = metar["flight_category"] if metar else None
     return row
 
 
@@ -154,6 +175,22 @@ def extract(file_paths=None, out_path_prefix="data/processed/_extracted_shard"):
             )
         )
 
+        metar_lookup = (
+            p
+            | "ReadMetar" >> ReadFromParquet(METAR_PATH)
+            | "MetarToKV"
+            >> beam.Map(
+                lambda row: (
+                    (row["airport"], row["hour"]),
+                    {
+                        "visibility_mi": row["visibility_mi"],
+                        "ceiling_ft": row["ceiling_ft"],
+                        "flight_category": row["flight_category"],
+                    },
+                )
+            )
+        )
+
         flight_sources = [
             p | f"ReadFlights_{i}" >> ReadFromParquet(path, columns=FLIGHT_COLUMNS)
             for i, path in enumerate(file_paths)
@@ -166,6 +203,8 @@ def extract(file_paths=None, out_path_prefix="data/processed/_extracted_shard"):
             | "AddTimeFeatures" >> beam.Map(add_time_features_row)
             | "JoinWeather"
             >> beam.Map(join_weather_row, weather_lookup=beam.pvalue.AsDict(weather_lookup))
+            | "JoinMetar"
+            >> beam.Map(join_metar_row, metar_lookup=beam.pvalue.AsDict(metar_lookup))
             | "SelectExtractedColumns"
             >> beam.Map(lambda row: {k: row[k] for k in EXTRACTED_SCHEMA.names})
             | "WriteExtracted"
@@ -225,19 +264,66 @@ def transform(extracted_glob=EXTRACTED_GLOB, out_path_prefix=OUT_PATH_PREFIX):
         )
 
 
+def transform_pandas(extracted_glob=EXTRACTED_GLOB, out_path_prefix=OUT_PATH_PREFIX):
+    """Plain-pandas equivalent of transform(), for when running the rolling-window step
+    through Beam/Prism isn't practical on this machine -- on 2026-08-19 Prism's
+    GroupByKey shuffle over the full ~2.28M-row extracted dataset twice took down the
+    whole Docker Desktop VM (not just the job) rather than failing cleanly, and a
+    smaller-machine Docker memory limit was the suspected cause. The actual computation
+    here is small enough to not need Beam's distributed machinery at all (a few hundred
+    MB, 7 airports) -- reuses the exact same rolling_traffic_for_airport() as both
+    transform() and the pandas prototype (ml/features.py), so this isn't a divergent
+    reimplementation, just a different execution engine for identical logic. Prefer
+    transform() when Beam/Prism is healthy; this is the documented fallback."""
+    extracted_files = sorted(glob.glob(extracted_glob))
+    flights = pd.concat([pd.read_parquet(f) for f in extracted_files], ignore_index=True)
+
+    mean_delay_by_airport = flights.groupby("adep")["delayed_15min"].mean().to_dict()
+
+    parts = []
+    for adep, group in flights.groupby("adep", sort=False):
+        g = rolling_traffic_for_airport(group)
+        fill_value = mean_delay_by_airport.get(adep, 0.0)
+        for window in TRAFFIC_WINDOWS:
+            g[f"traffic_{window}"] = g[f"traffic_{window}"].fillna(0)
+            g[f"delay_rate_{window}"] = g[f"delay_rate_{window}"].fillna(fill_value)
+        parts.append(g)
+
+    features = pd.concat(parts, ignore_index=True)[list(OUTPUT_SCHEMA.names)]
+    out_path = f"{out_path_prefix}-00000-of-00001.parquet"
+    table = pa.Table.from_pandas(features, schema=OUTPUT_SCHEMA, preserve_index=False)
+    pq.write_table(table, out_path)
+    print(f"saved {len(features):,} rows to {out_path}")
+    return features
+
+
 def run():
     """Full pipeline in one process: extract() over all files, then transform().
     Works end-to-end (verified on the full dataset), but on this machine the local
     Prism runner processes on the order of ~5k rows/sec, so a single call to extract()
     over all ~4M raw rows takes ~15 minutes -- too long for one uninterrupted local run
-    in this environment. In practice this was run as: extract() four times over
-    consecutive ~40-file chunks of FLIGHTS_GLOB (each into its own
-    data/processed/_extracted_shardN-...parquet), then transform() once over all four
-    extracted shards together, so the rolling-window step still sees each airport's
-    complete, correctly-ordered history."""
+    in this environment. See run_chunked() for what's actually run in practice."""
     extract()
     transform()
 
 
+def run_chunked(chunk_size: int = 40):
+    """What's actually run in practice: extract() split across several Beam jobs, each
+    over `chunk_size` raw files (~40 files/job keeps a single job well under the
+    ~15min-for-everything ceiling noted in run()'s docstring), writing each chunk to
+    its own data/processed/_extracted_shardN-...parquet. transform() then runs ONCE
+    over all extracted shards together, so the rolling-window step still sees each
+    airport's complete, correctly-ordered history (splitting that step too would
+    silently under-count traffic near each chunk boundary -- see transform()'s
+    docstring)."""
+    file_paths = sorted(glob.glob(FLIGHTS_GLOB))
+    chunks = [file_paths[i : i + chunk_size] for i in range(0, len(file_paths), chunk_size)]
+    for i, chunk in enumerate(chunks):
+        print(f"extract chunk {i + 1}/{len(chunks)} ({len(chunk)} files)...", flush=True)
+        extract(file_paths=chunk, out_path_prefix=f"data/processed/_extracted_shard{i}")
+    print("transform (rolling windows over all extracted shards)...", flush=True)
+    transform()
+
+
 if __name__ == "__main__":
-    run()
+    run_chunked()
