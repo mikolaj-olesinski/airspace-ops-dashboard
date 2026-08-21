@@ -142,14 +142,17 @@ importance): [`docs/diagrams/training-flow.excalidraw`](docs/diagrams/training-f
 
 ## Stack
 
-| Layer | Choice |
+| Layer | Technology |
 |---|---|
-| Data pipeline | Apache Beam (DirectRunner) |
-| Model | LightGBM, tracked in MLflow |
-| LLM agent | LangGraph + Claude (briefing generation + tool-calling chat) |
-| Backend | FastAPI, in-memory pollers/caches per data source |
-| Frontend | React + Vite + MapLibre GL + Tailwind |
-| Orchestration | Docker Compose (single command, no manual multi-terminal setup) |
+| Data pipeline | **Apache Beam** (DirectRunner) — batch feature engineering over historical flights |
+| Model | **LightGBM** — gradient-boosted binary classifier, walk-forward CV via **scikit-learn** + **pandas** |
+| Experiment tracking | **MLflow** — nested hyperparameter-search runs, model registry the backend loads from |
+| LLM agent | **LangGraph** + **langchain-anthropic** (Claude) — ReAct tool-calling agent for the briefing and chat |
+| Backend | **FastAPI** + **uvicorn** — in-memory pollers/caches per data source |
+| Frontend | **React** + **TypeScript** + **Vite** + **MapLibre GL** + **Tailwind CSS** |
+| Data ingestion | `requests`, `pyarrow`, `datasets` / `huggingface_hub`, `holidays` |
+| Notebooks | Jupyter (`ipykernel`, `nbconvert`), `matplotlib` — [`notebooks/model_showcase.ipynb`](notebooks/model_showcase.ipynb) |
+| Orchestration | **Docker Compose** — single command, no manual multi-terminal setup |
 
 ## Origin
 

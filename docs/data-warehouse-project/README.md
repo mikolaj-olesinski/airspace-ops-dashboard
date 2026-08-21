@@ -110,6 +110,10 @@ heading for trouble in the next two hours."* mini-Prescience is that same questi
 asked live: a trained model instead of a cube, a real-time feed instead of a 2015 CSV
 dump, and a generated explanation instead of a pivot table someone has to read.
 
-The original project files (SQL DDL, full ETL packages, presentation slides) aren't
-included here — this page is a translated, condensed summary of the parts relevant to
-mini-Prescience's own story.
+This page is a translated, condensed summary of the parts relevant to mini-Prescience's
+own story. The original files (Polish) are in [`original/`](original/):
+[`ProjektHurtownieCałe.pdf`](original/ProjektHurtownieCałe.pdf) (the full report this
+page is drawn from), [`TworzenieTabelHurtownie.sql`](original/TworzenieTabelHurtownie.sql)
+(the star-schema DDL), and the two presentation decks
+([`PrezentacjaHurtownieDanych.pdf`](original/PrezentacjaHurtownieDanych.pdf),
+[`PrezentacjaHurtownieDanych2.pdf`](original/PrezentacjaHurtownieDanych2.pdf)).
