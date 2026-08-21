@@ -151,6 +151,13 @@ importance): [`docs/diagrams/training-flow.excalidraw`](docs/diagrams/training-f
 | Frontend | React + Vite + MapLibre GL + Tailwind |
 | Orchestration | Docker Compose (single command, no manual multi-terminal setup) |
 
+## Origin
+
+This isn't the first project on this exact topic. An earlier university project built a
+classic SQL Server data warehouse + OLAP cube on 5.8M US flight records (2015) — the
+same domain, answered descriptively instead of predictively. Write-up, star schema, and
+the original analysis charts: [`docs/data-warehouse-project/`](docs/data-warehouse-project/).
+
 ## Status
 
 Functionally complete and, in places, ahead of the original build plan (walk-forward

@@ -23,6 +23,7 @@ services:
       # image rebuild every time they change -- mounted read-write same as the others
       - ./scripts:/app/scripts
       - ./pipeline:/app/pipeline
+      - ./notebooks:/app/notebooks
 
   frontend:
     build:
